@@ -1,147 +1,156 @@
-package xrs
+package reedsolomon
 
-import (
-	"errors"
-)
+import "errors"
 
-type matrix [][]byte // byte[row][col]
+type matrix []byte
 
-func NewMatrix(rows, cols int) matrix {
-	m := matrix(make([][]byte, rows))
-	for i := range m {
-		m[i] = make([]byte, cols)
+func genEncMatrixCauchy(d, p int) matrix {
+	t := d + p
+	m := make([]byte, t*d)
+	for i := 0; i < d; i++ {
+		m[i*d+i] = byte(1)
 	}
-	return m
-}
 
-// return identity matrix(upper) cauchy matrix(lower)
-func genEncodeMatrix(rows, cols int) matrix {
-	m := NewMatrix(rows, cols)
-	// identity matrix
-	for j := 0; j < cols; j++ {
-		m[j][j] = byte(1)
-	}
-	// cauchy matrix
-	for i := cols; i < rows; i++ {
-		for j := 0; j < cols; j++ {
+	d2 := d * d
+	for i := d; i < t; i++ {
+		for j := 0; j < d; j++ {
 			d := i ^ j
-			a := inverseTable[d]
-			m[i][j] = byte(a)
+			a := inverseTbl[d]
+			m[d2] = byte(a)
+			d2++
 		}
 	}
 	return m
 }
 
-func (m matrix) invert() (matrix, error) {
-	size := len(m)
-	iM := identityMatrix(size)
-	mIM, _ := m.augIM(iM)
+func gfExp(b byte, n int) byte {
+	if n == 0 {
+		return 1
+	}
+	if b == 0 {
+		return 0
+	}
+	a := logTbl[b]
+	ret := int(a) * n
+	for ret >= 255 {
+		ret -= 255
+	}
+	return byte(expTbl[ret])
+}
 
-	err := mIM.gaussJordan()
+func genVandMatrix(vm []byte, t, d int) {
+	for i := 0; i < t; i++ {
+		for j := 0; j < d; j++ {
+			vm[i*d+j] = gfExp(byte(i), j)
+		}
+	}
+}
+
+func (m matrix) mul(right matrix, rows, cols int, r []byte) {
+	for i := 0; i < rows; i++ {
+		for j := 0; j < cols; j++ {
+			var v byte
+			for k := 0; k < cols; k++ {
+				v ^= gfMul(m[i*cols+k], right[k*cols+j])
+			}
+			r[i*cols+j] = v
+		}
+	}
+}
+
+func genEncMatrixVand(d, p int) (matrix, error) {
+	t := d + p
+	buf := make([]byte, (2*t+4*d)*d)
+	vm := buf[:t*d]
+	genVandMatrix(vm, t, d)
+	top := buf[t*d : (t+d)*d]
+	copy(top, vm[:d*d])
+	raw := buf[(t+d)*d : (t+3*d)*d]
+	im := buf[(t+3*d)*d : (t+4*d)*d]
+	err := matrix(top).invert(raw, d, im)
 	if err != nil {
 		return nil, err
 	}
-	return mIM.subMatrix(size), nil
+	r := buf[(t+4*d)*d : (2*t+4*d)*d]
+	matrix(vm).mul(im, t, d, r)
+	return matrix(r), nil
 }
 
-// IN -> (IN|I)
-func (m matrix) augIM(iM matrix) (matrix, error) {
-	result := NewMatrix(len(m), len(m[0])+len(iM[0]))
-	for r, row := range m {
-		for c := range row {
-			result[r][c] = m[r][c]
-		}
-		cols := len(m[0])
-		for c := range iM[0] {
-			result[r][cols+c] = iM[r][c]
-		}
+// [I|m'] -> [m']
+func (m matrix) subMatrix(n int, r []byte) {
+	for i := 0; i < n; i++ {
+		off := i * n
+		copy(r[off:off+n], m[2*off+n:2*(off+n)])
 	}
-	return result, nil
 }
 
-var ErrSingular = errors.New("reedsolomon: matrix is singular")
+func (m matrix) invert(raw matrix, n int, im []byte) error {
+	// [m] -> [m|I]
+	for i := 0; i < n; i++ {
+		t := i * n
+		copy(raw[2*t:2*t+n], m[t:t+n])
+		raw[2*t+i+n] = byte(1)
+	}
+	err := gauss(raw, n)
+	if err != nil {
+		return err
+	}
+	raw.subMatrix(n, im)
+	return nil
+}
 
-// (IN|I) -> (I|OUT)
-func (m matrix) gaussJordan() error {
-	rows := len(m)
-	columns := len(m[0])
-	// Clear out the part below the main diagonal and scale the main
-	// diagonal to be 1.
-	for r := 0; r < rows; r++ {
-		// If the element on the diagonal is 0, find a row below
-		// that has a non-zero and swap them.
-		if m[r][r] == 0 {
-			for rowBelow := r + 1; rowBelow < rows; rowBelow++ {
-				if m[rowBelow][r] != 0 {
-					m.swapRows(r, rowBelow)
+func (m matrix) swap(i, j, n int) {
+	for k := 0; k < n; k++ {
+		m[i*n+k], m[j*n+k] = m[j*n+k], m[i*n+k]
+	}
+}
+
+func gfMul(a, b byte) byte {
+	return mulTbl[a][b]
+}
+
+var errSingular = errors.New("rs.invert: matrix is singular")
+
+// [m|I] -> [I|m']
+func gauss(m matrix, n int) error {
+	n2 := 2 * n
+	for i := 0; i < n; i++ {
+		if m[i*n2+i] == 0 {
+			for j := i + 1; j < n; j++ {
+				if m[j*n2+i] != 0 {
+					m.swap(i, j, n2)
 					break
 				}
 			}
 		}
-		// After swap, if we find all elements in this column is 0, it means the matrix's det is 0
-		if m[r][r] == 0 {
-			return ErrSingular
+		if m[i*n2+i] == 0 {
+			return errSingular
 		}
-		// Scale to 1.
-		if m[r][r] != 1 {
-			d := m[r][r]
-			scale := inverseTable[d]
-			// every element(this column) * m[pig][pig]'s inverse
-			for c := 0; c < columns; c++ {
-				m[r][c] = gfMul(m[r][c], scale)
+		if m[i*n2+i] != 1 {
+			d := m[i*n2+i]
+			scale := inverseTbl[d]
+			for c := 0; c < n2; c++ {
+				m[i*n2+c] = gfMul(m[i*n2+c], scale)
 			}
 		}
-		//Make everything below the 1 be a 0 by subtracting a multiple of it
-		for rowBelow := r + 1; rowBelow < rows; rowBelow++ {
-			if m[rowBelow][r] != 0 {
-				// scale * m[pig][pig] = scale, scale + scale = 0
-				// makes m[pig][pig+1] = 0 , then calc left elements
-				scale := m[rowBelow][r]
-				for c := 0; c < columns; c++ {
-					m[rowBelow][c] ^= gfMul(scale, m[r][c])
+		for j := i + 1; j < n; j++ {
+			if m[j*n2+i] != 0 {
+				scale := m[j*n2+i]
+				for c := 0; c < n2; c++ {
+					m[j*n2+c] ^= gfMul(scale, m[i*n2+c])
 				}
 			}
 		}
 	}
-	// Now clear the part above the main diagonal.
-	// same logic with clean upper
-	for d := 0; d < rows; d++ {
-		for rowAbove := 0; rowAbove < d; rowAbove++ {
-			if m[rowAbove][d] != 0 {
-				scale := m[rowAbove][d]
-				for c := 0; c < columns; c++ {
-					m[rowAbove][c] ^= gfMul(scale, m[d][c])
+	for k := 0; k < n; k++ {
+		for j := 0; j < k; j++ {
+			if m[j*n2+k] != 0 {
+				scale := m[j*n2+k]
+				for c := 0; c < n2; c++ {
+					m[j*n2+c] ^= gfMul(scale, m[k*n2+c])
 				}
 			}
 		}
 	}
 	return nil
-}
-
-func identityMatrix(n int) matrix {
-	m := NewMatrix(n, n)
-	for i := 0; i < n; i++ {
-		m[i][i] = byte(1)
-	}
-	return m
-}
-
-// (I|OUT) -> OUT
-func (m matrix) subMatrix(size int) matrix {
-	result := NewMatrix(size, size)
-	for r := 0; r < size; r++ {
-		for c := size; c < size*2; c++ {
-			result[r][c-size] = m[r][c]
-		}
-	}
-	return result
-}
-
-// SwapRows Exchanges two rows in the matrix.
-func (m matrix) swapRows(r1, r2 int) {
-	m[r2], m[r1] = m[r1], m[r2]
-}
-
-func gfMul(a, b byte) byte {
-	return mulTable[a][b]
 }
