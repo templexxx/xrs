@@ -1,6 +1,6 @@
 // +build !amd64
 
-package reedsolomon
+package xrs
 
 func newRS(d, p int, em matrix) (enc Encoder) {
 	g := em[d*d:]

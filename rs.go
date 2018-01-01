@@ -2,13 +2,18 @@
 	X-Reed-Solomon Codes over GF(2^8)
 	Primitive Polynomial:  x^8+x^4+x^3+x^2+1
 	Galois Filed arithmetic using Intel SIMD instructions (AVX2 or SSSE3)
+
+	xrs core ideas:
+	1. reed-solomon encode
+	2. Split each vect into two equal pieces: a&b
+	3. xor some vects from a with f(b) (f(b) is the result of rs encode)
 */
 
-package reedsolomon
+package xrs
 
 import (
 	"errors"
-	"unicode"
+	"fmt"
 )
 
 // Encoder implements for X-Reed-Solomon Encoding/Reconstructing
@@ -29,16 +34,40 @@ type Encoder interface {
 	Reconst(vects [][]byte, has, lost []int) error
 	// ReconstData only repair lost data with survived&lost vects position
 	ReconstData(vects [][]byte, has, lost []int) error
+	// VectsNeed receive lost position return vects position that are needed for reconstructing
+	VectsNeed(lost int) (pb int, a []int, err error) // pb: index of b parity
 }
 
 func checkCfg(d, p int) error {
 	if (d <= 0) || (p <= 0) {
-		return errors.New("rs.New: data or parity <= 0")
+		return errors.New("xrs.checkCfg: data or parity <= 0")
 	}
 	if d+p >= 256 {
-		return errors.New("rs.New: data+parity >= 256")
+		return errors.New("xrs.checkCfg: data+parity >= 256")
 	}
 	return nil
+}
+
+// generator xor_map <vects_index>:<data_a_index_list>
+// e.g. 10+4
+// 11:[0 3 6 9] 12:[1 4 7] 13:[2 5 8]
+func genXM(d, p int, m map[int][]int) {
+	a := 0
+	for {
+		if a == d {
+			break
+		}
+		for i := d + 1; i < d+p; i++ {
+			if a == d {
+				break
+			}
+			l := m[i]
+			l = append(l, a)
+			m[i] = l
+			a++
+		}
+	}
+	return
 }
 
 // New create an Encoder (vandermonde matrix)
@@ -51,7 +80,9 @@ func New(data, parity int) (enc Encoder, err error) {
 	if err != nil {
 		return
 	}
-	return newRS(data, parity, e), nil
+	m := make(map[int][]int)
+	genXM(data, parity, m)
+	return newRS(data, parity, e, m), nil
 }
 
 // NewCauchy create an Encoder (cauchy matrix)
@@ -61,7 +92,9 @@ func NewCauchy(data, parity int) (enc Encoder, err error) {
 		return
 	}
 	e := genEncMatrixCauchy(data, parity)
-	return newRS(data, parity, e), nil
+	m := make(map[int][]int)
+	genXM(data, parity, m)
+	return newRS(data, parity, e, m), nil
 }
 
 type encBase struct {
@@ -69,22 +102,27 @@ type encBase struct {
 	parity int
 	encode []byte
 	gen    []byte
+	xm     map[int][]int // <vects_index>:<data_a_index_list>
 }
 
 func checkEnc(d, p int, vs [][]byte) (size int, err error) {
 	total := len(vs)
 	if d+p != total {
-		err = errors.New("rs.checkER: vects not match rs args")
+		err = errors.New("xrs.checkEnc: vects not match rs args")
 		return
 	}
 	size = len(vs[0])
 	if size == 0 {
-		err = errors.New("rs.checkER: vects size = 0")
+		err = errors.New("xrs.checkEnc: vects size = 0")
+		return
+	}
+	if !((size & 1) == 0) { // it isn't even
+		err = errors.New("xrs.checkEnc: vects size is odd")
 		return
 	}
 	for i := 1; i < total; i++ {
 		if len(vs[i]) != size {
-			err = errors.New("rs.checkER: vects size mismatch")
+			err = errors.New("xrs.checkEnc: vects size mismatch")
 			return
 		}
 	}
@@ -94,13 +132,14 @@ func checkEnc(d, p int, vs [][]byte) (size int, err error) {
 func (e *encBase) Encode(vects [][]byte) (err error) {
 	d := e.data
 	p := e.parity
-	_, err = checkEnc(d, p, vects)
+	size, err := checkEnc(d, p, vects)
 	if err != nil {
 		return
 	}
 	dv := vects[:d]
 	pv := vects[d:]
 	g := e.gen
+	// step1: reedsolomon encode
 	for i := 0; i < d; i++ {
 		for j := 0; j < p; j++ {
 			if i != 0 {
@@ -109,6 +148,17 @@ func (e *encBase) Encode(vects [][]byte) (err error) {
 				mulVect(g[j*d], dv[0], pv[j])
 			}
 		}
+	}
+	// step2: xor a & f(b)
+	for p, a := range e.xm {
+		v := make([][]byte, len(a)+1)
+		i := 1
+		for _, k := range a {
+			v[i] = vects[k][0:size]
+			i++
+		}
+		v[0] = vects[p][size : size*2]
+		xorBase(vects[p][size:size*2], v)
 	}
 	return
 }
@@ -128,25 +178,14 @@ func mulVectAdd(c byte, a, b []byte) {
 }
 
 func (e *encBase) Reconst(vects [][]byte, has, lost []int) error {
-	return e.reconstWithPos(vects, has, lost, false)
+	return e.reconst(vects, has, lost, false)
 }
 
 func (e *encBase) ReconstData(vects [][]byte, has, lost []int) error {
-	return e.reconstWithPos(vects, has, lost, true)
+	return e.reconst(vects, has, lost, true)
 }
 
-func spiltLost(d int, lost []int) (dLost, pLost []int) {
-	for _, l := range lost {
-		if l >= d {
-			pLost = append(pLost, l)
-		} else {
-			dLost = append(dLost, l)
-		}
-	}
-	return
-}
-
-func (e *encBase) reconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) (err error) {
+func (e *encBase) rsReconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) (err error) {
 	d := e.data
 	em := e.encode
 	dCnt := len(dLost)
@@ -211,21 +250,64 @@ func (e *encBase) reconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool
 	return
 }
 
-func (e *encBase) reconstWithPos(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
+func spiltLost(d int, lost []int) (dLost, pLost []int) {
+	for _, l := range lost {
+		if l >= d {
+			pLost = append(pLost, l)
+		} else {
+			dLost = append(dLost, l)
+		}
+	}
+	return
+}
+
+func (e *encBase) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
 	d := e.data
 	p := e.parity
 	// TODO check more, maybe element in has show in lost & deal with len(has) > d
+	if len(has) < d {
+		return errors.New("xrs.Reconst: not enough vects")
+	}
+	has = has[:d]
 	if len(has) != d {
-		return errors.New("rs.Reconst: not enough vects")
+		return errors.New("xrs.Reconst: not enough vects")
 	}
 	dLost, pLost := spiltLost(e.data, lost)
 	dCnt := len(dLost)
 	if dCnt > p {
-		return errors.New("rs.Reconst: not enough vects")
+		return errors.New("xrs.Reconst: not enough vects")
 	}
 	pCnt := len(pLost)
 	if pCnt > p {
-		return errors.New("rs.Reconst: not enough vects")
+		return errors.New("xrs.Reconst: not enough vects")
 	}
-	return e.reconst(vects, has, dLost, pLost, dataOnly)
+	return e.rsReconst(vects, has, dLost, pLost, dataOnly)
+}
+
+func isIn(e int, s []int) bool {
+	for _, v := range s {
+		if e == v {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *encBase) VectsNeed(lost int) (pb int, a []int, err error) {
+	if lost < 0 || lost >= e.data {
+		err = errors.New(fmt.Sprintf("xrs.VectsNeed: can't rsReconst vects[%d] by xor; numData is %d", lost, e.data))
+		return
+	}
+	for k, s := range e.xm {
+		if isIn(lost, s) {
+			pb = k
+			break
+		}
+	}
+	for _, v := range e.xm[pb] {
+		if v != lost {
+			a = append(a, v)
+		}
+	}
+	return
 }

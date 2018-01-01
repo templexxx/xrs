@@ -1,4 +1,4 @@
-package reedsolomon
+package xrs
 
 import (
 	"errors"
@@ -14,22 +14,13 @@ const (
 	ssse3
 )
 
-var extension = none
-
-func init() {
-	getEXT()
-}
-
-func getEXT() {
+func getEXT() int {
 	if cpufeat.X86.HasAVX2 {
-		extension = avx2
-		return
+		return avx2
 	} else if cpufeat.X86.HasSSSE3 {
-		extension = ssse3
-		return
+		return ssse3
 	} else {
-		extension = none
-		return
+		return none
 	}
 }
 
@@ -66,33 +57,29 @@ type (
 		encode matrix
 		gen    matrix
 		tbl    []byte
+		xm     map[int][]int
 		// inverse matrix cache is design for small vect size ( < 4KB )
 		// it will save time for calculating inverse matrix
 		// but it's not so important for big vect size
 		enableCache  bool
-		inverseCache iCache
-	}
-	iCache struct {
-		sync.RWMutex
-		data map[uint32][]byte
+		inverseCache sync.Map
 	}
 )
 
-func newRS(d, p int, em matrix) (enc Encoder) {
+func newRS(d, p int, em matrix, xm map[int][]int) (enc Encoder) {
 	g := em[d*d:]
-	if extension == none {
-		return &encBase{data: d, parity: p, encode: em, gen: g}
+	ext := getEXT()
+	if ext == none {
+		return &encBase{data: d, parity: p, encode: em, gen: g, xm: xm}
 	}
 	t := make([]byte, d*p*32)
 	initTbl(g, p, d, t)
 	ok := okCache(d, p)
-	if extension == avx2 {
-		e := &encAVX2{data: d, parity: p, encode: em, gen: g, tbl: t, enableCache: ok,
-			inverseCache: iCache{data: make(map[uint32][]byte)}}
+	if ext == avx2 {
+		e := &encAVX2{data: d, parity: p, encode: em, gen: g, tbl: t, xm: xm, enableCache: ok}
 		return e
 	}
-	e := &encSSSE3{data: d, parity: p, encode: em, gen: g, tbl: t, enableCache: ok,
-		inverseCache: iCache{data: make(map[uint32][]byte)}}
+	e := &encSSSE3{data: d, parity: p, encode: em, gen: g, tbl: t, xm: xm, enableCache: ok}
 	return e
 }
 

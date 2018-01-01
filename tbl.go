@@ -1,4 +1,4 @@
-package reedsolomon
+package xrs
 
 var logTbl = [256]byte{
 	0, 0, 1, 25, 2, 50, 26, 198,

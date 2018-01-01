@@ -1,4 +1,4 @@
-package reedsolomon
+package xrs
 
 import "errors"
 
