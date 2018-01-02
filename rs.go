@@ -158,10 +158,10 @@ func (e *encBase) Encode(vects [][]byte) (err error) {
 	if err != nil {
 		return
 	}
+	// step1: reedsolomon encode
 	dv := vects[:d]
 	pv := vects[d:]
 	g := e.gen
-	// step1: reedsolomon encode
 	for i := 0; i < d; i++ {
 		for j := 0; j < p; j++ {
 			if i != 0 {
@@ -209,29 +209,29 @@ func (e *encBase) rsReconstData(vects [][]byte, has, lost []int) (err error) {
 		copy(g[i*d:i*d+d], im[l*d:l*d+d])
 	}
 	eTmp := &encBase{data: d, parity: nl, gen: g}
-	err = eTmp.Encode(v[:d+nl])
+	err = eTmp.Encode(v)
 	if err != nil {
 		return
 	}
 	return
 }
 
-func (e *encBase) rsReconstParity(vects [][]byte, pLost []int) (err error) {
+func (e *encBase) rsReconstParity(vects [][]byte, lost []int) (err error) {
 	d := e.data
-	pl := len(pLost)
-	v := make([][]byte, d+pl)
-	g := make([]byte, pl*d)
-	for i, l := range pLost {
+	nl := len(lost)
+	v := make([][]byte, d+nl)
+	g := make([]byte, nl*d)
+	for i, l := range lost {
 		copy(g[i*d:i*d+d], e.encode[l*d:l*d+d])
 	}
 	for i := 0; i < d; i++ {
 		v[i] = vects[i]
 	}
-	for i, p := range pLost {
+	for i, p := range lost {
 		v[i+d] = vects[p]
 	}
-	etmp := &encBase{data: d, parity: pl, gen: g}
-	err = etmp.Encode(v[:d+pl])
+	etmp := &encBase{data: d, parity: nl, gen: g}
+	err = etmp.Encode(v)
 	if err != nil {
 		return
 	}
