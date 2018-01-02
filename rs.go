@@ -5,8 +5,11 @@
 
 	xrs core ideas:
 	1. reed-solomon encode
-	2. Split each vect into two equal pieces: a&b
-	3. xor some vects from a with f(b) (f(b) is the result of rs encode)
+	2. split each vect into two equal pieces: a&b
+	3. xor some vects from a with f(b) (f(b) is the result of rs encode bVects)
+
+	More details:
+	docs/..
 */
 
 package xrs
@@ -14,28 +17,33 @@ package xrs
 import (
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // Encoder implements for X-Reed-Solomon Encoding/Reconstructing
+// size of vects(vectors) must be equal
 type Encoder interface {
 	// Encode outputs parity into vects
-	// warning: len(vects) must be equal with num of data+parity
 	Encode(vects [][]byte) error
-	// Reconst repair lost data&parity with has&lost vects position
+
+	// Reconst repair missing vects (not just missing one data vects)
 	// e.g:
-	// in 3+2, the whole position: [0,1,2,3,4]
-	// if lost vects[0,4]
-	// the "has" will be [1,2,3]
-	// then you must be sure that vects[1] vects[2] vects[3] have correct data
+	// in 3+2, the whole index: [0,1,2,3,4]
+	// if vects[0,4] are lost
+	// the "has" will be [1,2,3] ,and you must be sure that vects[1] vects[2] vects[3] have correct data
+	// len(has) must be equal with num_data
 	// results will be put into vects[0]&vects[4]
-	// warning:
-	// 1. each vect has same len, don't set it nil
-	// 2. len(has) must equal num of data vects
 	Reconst(vects [][]byte, has, lost []int) error
-	// ReconstData only repair lost data with survived&lost vects position
+
+	// ReconstData only repair data
 	ReconstData(vects [][]byte, has, lost []int) error
-	// VectsNeed receive lost position return vects position that are needed for reconstructing
-	VectsNeed(lost int) (pb int, a []int, err error) // pb: index of b parity
+
+	// VectsNeed receive lost index return a&parity_b vects' index that are needed for reconstructing
+	VectsNeed(lost int) (pb, a []int, err error)
+
+	// ReconstOne reconst one data vect, it saves I/O
+	// Make sure you have some specific vects ( you can get the vects index from VectsNeed)
+	ReconstOne(vects [][]byte, lost int) error
 }
 
 func checkCfg(d, p int) error {
@@ -97,14 +105,6 @@ func NewCauchy(data, parity int) (enc Encoder, err error) {
 	return newRS(data, parity, e, m), nil
 }
 
-type encBase struct {
-	data   int
-	parity int
-	encode []byte
-	gen    []byte
-	xm     map[int][]int // <vects_index>:<data_a_index_list>
-}
-
 func checkEnc(d, p int, vs [][]byte) (size int, err error) {
 	total := len(vs)
 	if d+p != total {
@@ -127,6 +127,28 @@ func checkEnc(d, p int, vs [][]byte) (size int, err error) {
 		}
 	}
 	return
+}
+
+type encBase struct {
+	data   int
+	parity int
+	encode []byte        // encode matrix
+	gen    []byte        // generator matrix
+	xm     map[int][]int // <vects_index>:<data_a_index_list>
+}
+
+func mulVect(c byte, a, b []byte) {
+	t := mulTbl[c]
+	for i := 0; i < len(a); i++ {
+		b[i] = t[a[i]]
+	}
+}
+
+func mulVectAdd(c byte, a, b []byte) {
+	t := mulTbl[c]
+	for i := 0; i < len(a); i++ {
+		b[i] ^= t[a[i]]
+	}
 }
 
 func (e *encBase) Encode(vects [][]byte) (err error) {
@@ -152,100 +174,122 @@ func (e *encBase) Encode(vects [][]byte) (err error) {
 	// step2: xor a & f(b)
 	for p, a := range e.xm {
 		v := make([][]byte, len(a)+1)
-		i := 1
-		for _, k := range a {
-			v[i] = vects[k][0:size]
-			i++
-		}
 		v[0] = vects[p][size : size*2]
+		for i, k := range a {
+			v[i+1] = vects[k][0:size]
+		}
 		xorBase(vects[p][size:size*2], v)
 	}
 	return
 }
 
-func mulVect(c byte, a, b []byte) {
-	t := mulTbl[c]
-	for i := 0; i < len(a); i++ {
-		b[i] = t[a[i]]
+func (e *encBase) rsReconstData(vects [][]byte, has, lost []int) (err error) {
+	d := e.data
+	nl := len(lost)
+	v := make([][]byte, d+nl)
+	for i, p := range has {
+		v[i] = vects[p]
 	}
-}
-
-func mulVectAdd(c byte, a, b []byte) {
-	t := mulTbl[c]
-	for i := 0; i < len(a); i++ {
-		b[i] ^= t[a[i]]
+	for i, p := range lost {
+		v[i+d] = vects[p]
 	}
+	mBuf := make([]byte, 4*d*d+nl*d) // help to reduce GC
+	m := mBuf[:d*d]
+	for i, l := range has {
+		copy(m[i*d:i*d+d], e.encode[l*d:l*d+d])
+	}
+	raw := mBuf[d*d : 3*d*d]
+	im := mBuf[3*d*d : 4*d*d] // inverse matrix
+	err = matrix(m).invert(raw, d, im)
+	if err != nil {
+		return
+	}
+	g := mBuf[4*d*d:]
+	for i, l := range lost {
+		copy(g[i*d:i*d+d], im[l*d:l*d+d])
+	}
+	eTmp := &encBase{data: d, parity: nl, gen: g}
+	err = eTmp.Encode(v[:d+nl])
+	if err != nil {
+		return
+	}
+	return
 }
 
-func (e *encBase) Reconst(vects [][]byte, has, lost []int) error {
-	return e.reconst(vects, has, lost, false)
-}
-
-func (e *encBase) ReconstData(vects [][]byte, has, lost []int) error {
-	return e.reconst(vects, has, lost, true)
+func (e *encBase) rsReconstParity(vects [][]byte, pLost []int) (err error) {
+	d := e.data
+	pl := len(pLost)
+	v := make([][]byte, d+pl)
+	g := make([]byte, pl*d)
+	for i, l := range pLost {
+		copy(g[i*d:i*d+d], e.encode[l*d:l*d+d])
+	}
+	for i := 0; i < d; i++ {
+		v[i] = vects[i]
+	}
+	for i, p := range pLost {
+		v[i+d] = vects[p]
+	}
+	etmp := &encBase{data: d, parity: pl, gen: g}
+	err = etmp.Encode(v[:d+pl])
+	if err != nil {
+		return
+	}
+	return
 }
 
 func (e *encBase) rsReconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) (err error) {
-	d := e.data
-	em := e.encode
-	dCnt := len(dLost)
-	size := len(vects[has[0]])
-	if dCnt != 0 {
-		vtmp := make([][]byte, d+dCnt)
-		for i, p := range has {
-			vtmp[i] = vects[p]
-		}
-		for i, p := range dLost {
-			if len(vects[p]) == 0 {
-				vects[p] = make([]byte, size)
-			}
-			vtmp[i+d] = vects[p]
-		}
-		matrixbuf := make([]byte, 4*d*d+dCnt*d)
-		m := matrixbuf[:d*d]
-		for i, l := range has {
-			copy(m[i*d:i*d+d], em[l*d:l*d+d])
-		}
-		raw := matrixbuf[d*d : 3*d*d]
-		im := matrixbuf[3*d*d : 4*d*d]
-		err2 := matrix(m).invert(raw, d, im)
-		if err2 != nil {
-			return err2
-		}
-		g := matrixbuf[4*d*d:]
-		for i, l := range dLost {
-			copy(g[i*d:i*d+d], im[l*d:l*d+d])
-		}
-		etmp := &encBase{data: d, parity: dCnt, gen: g}
-		err2 = etmp.Encode(vtmp[:d+dCnt])
-		if err2 != nil {
-			return err2
+	dl := len(dLost)
+	if dl != 0 {
+		err = e.rsReconstData(vects, has, dLost)
+		if err != nil {
+			return
 		}
 	}
 	if dataOnly {
 		return
 	}
-	pCnt := len(pLost)
-	if pCnt != 0 {
-		vtmp := make([][]byte, d+pCnt)
-		g := make([]byte, pCnt*d)
-		for i, l := range pLost {
-			copy(g[i*d:i*d+d], em[l*d:l*d+d])
+	pl := len(pLost)
+	if pl != 0 {
+		err = e.rsReconstParity(vects, pLost)
+		if err != nil {
+			return
 		}
-		for i := 0; i < d; i++ {
-			vtmp[i] = vects[i]
+	}
+	return
+}
+
+func isIn(e int, s []int) bool {
+	for _, v := range s {
+		if e == v {
+			return true
 		}
-		for i, p := range pLost {
-			if len(vects[p]) == 0 {
-				vects[p] = make([]byte, size)
-			}
-			vtmp[i+d] = vects[p]
+	}
+	return false
+}
+
+func checkReconst(d, p int, has, dLost, pLost []int) (err error) {
+	if len(has) < d {
+		err = errors.New("xrs.Reconst: not enough vects")
+		return
+	}
+	if len(has) > d { // = d is the best practice
+		err = errors.New("xrs.Reconst: too many vects")
+		return
+	}
+	for _, h := range has {
+		if isIn(h, dLost) {
+			err = errors.New("xrs.Reconst: has&lost are conflicting")
+			return
 		}
-		etmp := &encBase{data: d, parity: pCnt, gen: g}
-		err2 := etmp.Encode(vtmp[:d+pCnt])
-		if err2 != nil {
-			return err2
+		if isIn(h, pLost) {
+			err = errors.New("xrs.Reconst: has&lost are conflicting")
+			return
 		}
+	}
+	if len(dLost)+len(pLost) > p {
+		err = errors.New("xrs.Reconst: not enough vects")
+		return
 	}
 	return
 }
@@ -258,56 +302,120 @@ func spiltLost(d int, lost []int) (dLost, pLost []int) {
 			dLost = append(dLost, l)
 		}
 	}
+	sort.Ints(dLost)
+	sort.Ints(pLost)
 	return
 }
 
 func (e *encBase) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
-	d := e.data
-	p := e.parity
-	// TODO check more, maybe element in has show in lost & deal with len(has) > d
-	if len(has) < d {
-		return errors.New("xrs.Reconst: not enough vects")
-	}
-	has = has[:d]
-	if len(has) != d {
-		return errors.New("xrs.Reconst: not enough vects")
-	}
 	dLost, pLost := spiltLost(e.data, lost)
-	dCnt := len(dLost)
-	if dCnt > p {
-		return errors.New("xrs.Reconst: not enough vects")
-	}
-	pCnt := len(pLost)
-	if pCnt > p {
-		return errors.New("xrs.Reconst: not enough vects")
-	}
-	return e.rsReconst(vects, has, dLost, pLost, dataOnly)
-}
-
-func isIn(e int, s []int) bool {
-	for _, v := range s {
-		if e == v {
-			return true
-		}
-	}
-	return false
-}
-
-func (e *encBase) VectsNeed(lost int) (pb int, a []int, err error) {
-	if lost < 0 || lost >= e.data {
-		err = errors.New(fmt.Sprintf("xrs.VectsNeed: can't rsReconst vects[%d] by xor; numData is %d", lost, e.data))
+	err = checkReconst(e.data, e.parity, has, dLost, pLost)
+	if err != nil {
 		return
 	}
-	for k, s := range e.xm {
+	sort.Ints(has)
+	mid := len(vects[has[0]])
+	// step1: repair a_vects
+	aV := make([][]byte, e.data+e.parity)
+	for i, v := range vects {
+		aV[i] = v[:mid]
+	}
+	err = e.rsReconst(aV, has, dLost, pLost, dataOnly)
+	if err != nil {
+		return
+	}
+	// step2: parity back to f(b)
+	for _, h := range has {
+		if h > e.data {
+			a := e.xm[h]
+			xv := make([][]byte, len(a)+1)
+			xv[0] = vects[h][mid : mid*2]
+			for i, a0 := range a {
+				xv[i+1] = vects[a0][:mid]
+			}
+			xorBase(xv[0], xv)
+		}
+	}
+	// step3: repair b_vects
+	bV := make([][]byte, e.data+e.parity)
+	for i, v := range vects {
+		bV[i] = v[mid : mid*2]
+	}
+	err = e.rsReconst(bV, has, dLost, pLost, dataOnly)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func (e *encBase) Reconst(vects [][]byte, has, lost []int) error {
+	return e.reconst(vects, has, lost, false)
+}
+
+func (e *encBase) ReconstData(vects [][]byte, has, lost []int) error {
+	return e.reconst(vects, has, lost, true)
+}
+
+func vectsNeed(d, lost int, xm map[int][]int) (pb, a []int, err error) {
+	if lost < 0 || lost >= d {
+		err = errors.New(fmt.Sprintf("xrs.VectsNeed: can't rsReconst vects[%d] by xor; numData is %d", lost, d))
+		return
+	}
+	pb = make([]int, 2)
+	pb[0] = d // must has b_vects[d]
+	for k, s := range xm {
 		if isIn(lost, s) {
-			pb = k
+			pb[1] = k
 			break
 		}
 	}
-	for _, v := range e.xm[pb] {
+	for _, v := range xm[pb[1]] {
 		if v != lost {
 			a = append(a, v)
 		}
 	}
 	return
+}
+
+func (e *encBase) VectsNeed(lost int) (pb, a []int, err error) {
+	return vectsNeed(e.data, lost, e.xm)
+}
+
+func (e *encBase) ReconstOne(vects [][]byte, lost int) error {
+	// step1: recover b
+	d := e.data
+	bVects := make([][]byte, d+e.parity)
+	mid := len(vects) / 2
+	for i, v := range vects {
+		bVects[i] = v[mid : mid*2]
+	}
+	bHas := make([]int, d)
+	for i := 0; i < d; i++ {
+		bHas[i] = i
+	}
+	bHas[lost] = d
+	sort.Ints(bHas)
+	err := e.rsReconstData(bVects, bHas, []int{lost})
+	if err != nil {
+		return err
+	}
+	// step2: encode -> f(b)
+	pb, a, _ := e.VectsNeed(lost)
+	bVTmp := make([][]byte, d+1)
+	for i := 0; i < d; i++ {
+		bVTmp[i] = bVects[i]
+	}
+	bVTmp[d] = bVects[pb[1]]
+	g := make([]byte, d)
+	copy(g, e.encode[pb[1]*d:pb[1]*d+d])
+	etmp := &encBase{data: d, parity: 1, gen: g}
+	etmp.Encode(bVTmp)
+	// step3: pb xor f(b)&vects[a].. = lost_a
+	xorV := make([][]byte, len(a)+1)
+	xorV[0] = bVTmp[d]
+	for i, a0 := range a {
+		xorV[i+1] = vects[a0][:mid]
+	}
+	xorBase(vects[lost][:mid], xorV)
+	return nil
 }
