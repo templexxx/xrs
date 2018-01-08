@@ -3,301 +3,10 @@ package xrs
 import (
 	"errors"
 	"sort"
-	"sync"
-
-	"github.com/templexxx/cpufeat"
 )
-
-// SIMD Instruction Extensions
-const (
-	none = iota
-	avx2
-	ssse3
-)
-
-func getEXT() int {
-	if cpufeat.X86.HasAVX2 {
-		return avx2
-	} else if cpufeat.X86.HasSSSE3 {
-		return ssse3
-	} else {
-		return none
-	}
-}
-
-//go:noescape
-func copy32B(dst, src []byte) // Need SSE2(introduced in 2001)
-
-func initTbl(g matrix, rows, cols int, tbl []byte) {
-	off := 0
-	for i := 0; i < cols; i++ {
-		for j := 0; j < rows; j++ {
-			c := g[j*cols+i]
-			t := lowhighTbl[c][:]
-			copy32B(tbl[off:off+32], t)
-			off += 32
-		}
-	}
-}
-
-// TODO change the limits
-// At most 3060 inverse matrix (when data=14, parity=4, calc by github.com/templexxx/reedsolomon/mathtool/cntinverse)
-// In practice,  data usually below 12, parity below 5
-func okCache(data, parity int) bool {
-	if data < 15 && parity < 5 { // you can change it, but the data+parity can't be bigger than 32 (tips: see the codes about make inverse matrix)
-		return true
-	}
-	return false
-}
-
-type (
-	encSSSE3 encSIMD
-	encAVX2  encSIMD
-	encSIMD  struct {
-		data   int
-		parity int
-		encode matrix
-		gen    matrix
-		tbl    []byte
-		xm     map[int][]int
-		// inverse matrix cache is design for small vect size ( < 4KB )
-		// it will save time for calculating inverse matrix
-		// but it's not so important for big vect size
-		enableCache  bool
-		inverseCache sync.Map
-	}
-)
-
-func newRS(d, p int, em matrix, xm map[int][]int) (enc Encoder) {
-	g := em[d*d:]
-	ext := getEXT()
-	if ext == none {
-		return &encBase{data: d, parity: p, encode: em, gen: g, xm: xm}
-	}
-	t := make([]byte, d*p*32)
-	initTbl(g, p, d, t)
-	ok := okCache(d, p)
-	if ext == avx2 {
-		return &encAVX2{data: d, parity: p, encode: em, gen: g, tbl: t, xm: xm, enableCache: ok}
-	}
-	return &encSSSE3{data: d, parity: p, encode: em, gen: g, tbl: t, xm: xm, enableCache: ok}
-}
-
-// Size of sub-vector
-const unit = 16 * 1024
-
-// Split blocks into size divisible by 16
-func getDo(n int) int {
-	if n < unit {
-		c := n >> 4
-		if c == 0 {
-			return unit
-		}
-		return c << 4
-	}
-	return unit
-}
 
 func (e *encAVX2) Encode(vects [][]byte) (err error) {
-	d := e.data
-	p := e.parity
-	size, err := checkEnc(d, p, vects)
-	if err != nil {
-		return
-	}
-	// step1: reedsolomon encode
-	dv := vects[:d]
-	pv := vects[d:]
-	start, end := 0, 0
-	do := getDo(size)
-	for start < size {
-		end = start + do
-		if end <= size {
-			e.matrixMul(start, end, dv, pv)
-			start = end
-		} else {
-			e.matrixMulRemain(start, size, dv, pv)
-			start = size
-		}
-	}
-	// step2: xor a & f(b)
-	for p, a := range e.xm {
-		v := make([][]byte, len(a)+1)
-		v[0] = vects[p][size : size*2]
-		for i, k := range a {
-			v[i+1] = vects[k][0:size]
-		}
-		xorAVX2(vects[p][size:size*2], v)
-	}
-	return
-}
 
-//go:noescape
-func mulVectAVX2(tbl, d, p []byte)
-
-//go:noescape
-func mulVectAddAVX2(tbl, d, p []byte)
-
-func (e *encAVX2) matrixMul(start, end int, dv, pv [][]byte) {
-	d := e.data
-	p := e.parity
-	tbl := e.tbl
-	off := 0
-	for i := 0; i < d; i++ {
-		for j := 0; j < p; j++ {
-			t := tbl[off : off+32]
-			if i != 0 {
-				mulVectAddAVX2(t, dv[i][start:end], pv[j][start:end])
-			} else {
-				mulVectAVX2(t, dv[0][start:end], pv[j][start:end])
-			}
-			off += 32
-		}
-	}
-}
-
-func (e *encAVX2) matrixMulRemain(start, end int, dv, pv [][]byte) {
-	undone := end - start
-	do := (undone >> 4) << 4
-	d := e.data
-	p := e.parity
-	tbl := e.tbl
-	if do >= 16 {
-		end2 := start + do
-		off := 0
-		for i := 0; i < d; i++ {
-			for j := 0; j < p; j++ {
-				t := tbl[off : off+32]
-				if i != 0 {
-					mulVectAddAVX2(t, dv[i][start:end2], pv[j][start:end2])
-				} else {
-					mulVectAVX2(t, dv[0][start:end2], pv[j][start:end2])
-				}
-				off += 32
-			}
-		}
-		start = end
-	}
-	if undone > do {
-		// may recalculate some data(<16B), but still improve a lot (SIMD&reduce Cache pullution)
-		start2 := end - 16
-		if start2 >= 0 {
-			off := 0
-			for i := 0; i < d; i++ {
-				for j := 0; j < p; j++ {
-					t := tbl[off : off+32]
-					if i != 0 {
-						mulVectAddAVX2(t, dv[i][start2:end], pv[j][start2:end])
-					} else {
-						mulVectAVX2(t, dv[0][start2:end], pv[j][start2:end])
-					}
-					off += 32
-				}
-			}
-		} else {
-			g := e.gen
-			for i := 0; i < d; i++ {
-				for j := 0; j < p; j++ {
-					if i != 0 {
-						mulVectAdd(g[j*d+i], dv[i][start:], pv[j][start:])
-					} else {
-						mulVect(g[j*d], dv[0][start:], pv[j][start:])
-					}
-				}
-			}
-		}
-	}
-}
-
-// use generator-matrix but not tbls for encoding
-// it's design for reconstructing
-// for small vects, it cost to much time on initTbl, so drop it
-// and for big vects, the tbls can't impact much, because the cache will be filled with vects' data
-func (e *encAVX2) encodeGen(vects [][]byte) (err error) {
-	d := e.data
-	p := e.parity
-	size, err := checkEnc(d, p, vects)
-	if err != nil {
-		return
-	}
-	dv := vects[:d]
-	pv := vects[d:]
-	start, end := 0, 0
-	do := getDo(size)
-	for start < size {
-		end = start + do
-		if end <= size {
-			e.matrixMulGen(start, end, dv, pv)
-			start = end
-		} else {
-			e.matrixMulRemainGen(start, size, dv, pv)
-			start = size
-		}
-	}
-	return
-}
-
-func (e *encAVX2) matrixMulGen(start, end int, dv, pv [][]byte) {
-	d := e.data
-	p := e.parity
-	g := e.gen
-	for i := 0; i < d; i++ {
-		for j := 0; j < p; j++ {
-			t := lowhighTbl[g[j*d+i]][:]
-			if i != 0 {
-				mulVectAddAVX2(t, dv[i][start:end], pv[j][start:end])
-			} else {
-				mulVectAVX2(t, dv[0][start:end], pv[j][start:end])
-			}
-		}
-	}
-}
-
-func (e *encAVX2) matrixMulRemainGen(start, end int, dv, pv [][]byte) {
-	undone := end - start
-	do := (undone >> 4) << 4
-	d := e.data
-	p := e.parity
-	g := e.gen
-	if do >= 16 {
-		end2 := start + do
-		for i := 0; i < d; i++ {
-			for j := 0; j < p; j++ {
-				t := lowhighTbl[g[j*d+i]][:]
-				if i != 0 {
-					mulVectAddAVX2(t, dv[i][start:end2], pv[j][start:end2])
-				} else {
-					mulVectAVX2(t, dv[0][start:end2], pv[j][start:end2])
-				}
-			}
-		}
-		start = end
-	}
-	if undone > do {
-		start2 := end - 16
-		if start2 >= 0 {
-			for i := 0; i < d; i++ {
-				for j := 0; j < p; j++ {
-					t := lowhighTbl[g[j*d+i]][:]
-					if i != 0 {
-						mulVectAddAVX2(t, dv[i][start2:end], pv[j][start2:end])
-					} else {
-						mulVectAVX2(t, dv[0][start2:end], pv[j][start2:end])
-					}
-				}
-			}
-		} else {
-			for i := 0; i < d; i++ {
-				for j := 0; j < p; j++ {
-					if i != 0 {
-						mulVectAdd(g[j*d+i], dv[i][start:], pv[j][start:])
-					} else {
-						mulVect(g[j*d], dv[0][start:], pv[j][start:])
-					}
-				}
-			}
-		}
-	}
 }
 
 func (e *encAVX2) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
@@ -317,7 +26,7 @@ func (e *encAVX2) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err e
 	if err != nil {
 		return
 	}
-	// step2: parity back to f(b)
+	// step2: Parity back to f(b)
 	for _, h := range has {
 		if h > e.data {
 			a := e.xm[h]
@@ -436,7 +145,7 @@ func (e *encAVX2) ReconstOne(vects [][]byte, lost int) error {
 	if err != nil {
 		return err
 	}
-	// step2: encode -> f(b)
+	// step2: encM -> f(b)
 	pb, a, _ := e.VectsNeed(lost)
 	bVTmp := make([][]byte, d+1)
 	for i := 0; i < d; i++ {
@@ -455,62 +164,6 @@ func (e *encAVX2) ReconstOne(vects [][]byte, lost int) error {
 	}
 	xorAVX2(vects[lost][:mid], xorV)
 	return nil
-}
-
-// if enableCache, search cache first
-// if not found generate one
-func (e *encAVX2) makeGen(has, lost []int) (gen []byte, err error) {
-	d := e.data
-	em := e.encode
-	dl := len(lost)
-	if !e.enableCache {
-		mBuf := make([]byte, 4*d*d+dl*d)
-		m := mBuf[:d*d]
-		for i, l := range has {
-			copy(m[i*d:i*d+d], em[l*d:l*d+d])
-		}
-		raw := mBuf[d*d : 3*d*d]
-		im := mBuf[3*d*d : 4*d*d]
-		err2 := matrix(m).invert(raw, d, im)
-		if err2 != nil {
-			return nil, err2
-		}
-		g := mBuf[4*d*d:]
-		for i, l := range lost {
-			copy(g[i*d:i*d+d], im[l*d:l*d+d])
-		}
-		return g, nil
-	}
-	var ikey uint32
-	for _, p := range has {
-		ikey += 1 << uint8(p)
-	}
-	v, ok := e.inverseCache.Load(ikey)
-	if ok {
-		im := v.([]byte)
-		g := make([]byte, dl*d)
-		for i, l := range lost {
-			copy(g[i*d:i*d+d], im[l*d:l*d+d])
-		}
-		return g, nil
-	}
-	mBuf := make([]byte, 4*d*d+dl*d)
-	m := mBuf[:d*d]
-	for i, l := range has {
-		copy(m[i*d:i*d+d], em[l*d:l*d+d])
-	}
-	raw := mBuf[d*d : 3*d*d]
-	im := mBuf[3*d*d : 4*d*d]
-	err2 := matrix(m).invert(raw, d, im)
-	if err2 != nil {
-		return nil, err2
-	}
-	e.inverseCache.Store(ikey, im)
-	g := mBuf[4*d*d:]
-	for i, l := range lost {
-		copy(g[i*d:i*d+d], im[l*d:l*d+d])
-	}
-	return g, nil
 }
 
 func (e *encSSSE3) Encode(vects [][]byte) (err error) {
@@ -536,12 +189,6 @@ func (e *encSSSE3) Encode(vects [][]byte) (err error) {
 	}
 	return
 }
-
-//go:noescape
-func mulVectSSSE3(tbl, d, p []byte)
-
-//go:noescape
-func mulVectAddSSSE3(tbl, d, p []byte)
 
 func (e *encSSSE3) matrixMul(start, end int, dv, pv [][]byte) {
 	d := e.data
@@ -603,9 +250,9 @@ func (e *encSSSE3) matrixMulRemain(start, end int, dv, pv [][]byte) {
 			for i := 0; i < d; i++ {
 				for j := 0; j < p; j++ {
 					if i != 0 {
-						mulVectAdd(g[j*d+i], dv[i][start:], pv[j][start:])
+						mulVectAddBase(g[j*d+i], dv[i][start:], pv[j][start:])
 					} else {
-						mulVect(g[j*d], dv[0][start:], pv[j][start:])
+						mulVectBase(g[j*d], dv[0][start:], pv[j][start:])
 					}
 				}
 			}
@@ -643,7 +290,7 @@ func (e *encSSSE3) matrixMulGen(start, end int, dv, pv [][]byte) {
 	g := e.gen
 	for i := 0; i < d; i++ {
 		for j := 0; j < p; j++ {
-			t := lowhighTbl[g[j*d+i]][:]
+			t := lowHighTbl[g[j*d+i]][:]
 			if i != 0 {
 				mulVectAddSSSE3(t, dv[i][start:end], pv[j][start:end])
 			} else {
@@ -663,7 +310,7 @@ func (e *encSSSE3) matrixMulRemainGen(start, end int, dv, pv [][]byte) {
 		end2 := start + do
 		for i := 0; i < d; i++ {
 			for j := 0; j < p; j++ {
-				t := lowhighTbl[g[j*d+i]][:]
+				t := lowHighTbl[g[j*d+i]][:]
 				if i != 0 {
 					mulVectAddSSSE3(t, dv[i][start:end2], pv[j][start:end2])
 				} else {
@@ -678,7 +325,7 @@ func (e *encSSSE3) matrixMulRemainGen(start, end int, dv, pv [][]byte) {
 		if start2 >= 0 {
 			for i := 0; i < d; i++ {
 				for j := 0; j < p; j++ {
-					t := lowhighTbl[g[j*d+i]][:]
+					t := lowHighTbl[g[j*d+i]][:]
 					if i != 0 {
 						mulVectAddSSSE3(t, dv[i][start2:end], pv[j][start2:end])
 					} else {
@@ -690,9 +337,9 @@ func (e *encSSSE3) matrixMulRemainGen(start, end int, dv, pv [][]byte) {
 			for i := 0; i < d; i++ {
 				for j := 0; j < p; j++ {
 					if i != 0 {
-						mulVectAdd(g[j*d+i], dv[i][start:], pv[j][start:])
+						mulVectAddBase(g[j*d+i], dv[i][start:], pv[j][start:])
 					} else {
-						mulVect(g[j*d], dv[0][start:], pv[j][start:])
+						mulVectBase(g[j*d], dv[0][start:], pv[j][start:])
 					}
 				}
 			}

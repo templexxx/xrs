@@ -12,7 +12,7 @@ import (
 func xorBase(dst []byte, src [][]byte) {
 	size := len(src[0])
 	start := 0
-	do := unit
+	do := halfL1
 	for start < size {
 		end := start + do
 		if end <= size {
@@ -42,7 +42,7 @@ func xorBytesBase(dst, a, b []byte, size int) {
 	}
 }
 
-// split vect will improve performance with big data by reducing cache pollution
+// split vect will improve performance with big Data by reducing cache pollution
 func xorPartBase(start, end int, dst []byte, src [][]byte) {
 	xorBytesBase(dst[start:end], src[0][start:end], src[1][start:end], end-start)
 	for i := 2; i < len(src); i++ {

@@ -388,14 +388,3 @@ loop:
 	SUBQ   $1, len
 	JNZ    loop
 	RET
-
-// func copy32B(dst, src []byte)
-TEXT ·copy32B(SB), NOSPLIT, $0
-    MOVQ dst+0(FP), SI
-    MOVQ src+24(FP), DX
-    MOVOU (DX), X0
-    MOVOU 16(DX), X1
-    MOVOU X0, (SI)
-    MOVOU X1, 16(SI)
-    RET
-	
