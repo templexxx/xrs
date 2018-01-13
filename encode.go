@@ -13,10 +13,10 @@ func checkEnc(d, p int, vs [][]byte) (size int, err error) {
 		err = errors.New("xrs.checkEnc: vects size = 0")
 		return
 	}
-	if !((size & 1) == 0) { // it isn't even
-		err = errors.New("xrs.checkEnc: vects size is odd")
-		return
-	}
+	//if !((size & 1) == 0) { // it isn't even
+	//	err = errors.New("xrs.checkEnc: vects size is odd")
+	//	return
+	//}
 	for i := 1; i < total; i++ {
 		if len(vs[i]) != size {
 			err = errors.New("xrs.checkEnc: vects size mismatch")
@@ -38,9 +38,8 @@ func (x *xrs) enc(vects [][]byte, rsOnly bool) (err error) {
 	}
 	if (x.ext != none) && (size >= 16) { // 16bytes is the smallest SIMD register size
 		return x.encSIMD(vects, rsOnly)
-	} else {
-		return x.encBase(vects, rsOnly)
 	}
+	return x.encBase(vects, rsOnly)
 }
 
 // Size of sub-vector, fit for L1 Data Cache (32KB)
@@ -77,10 +76,10 @@ func (x *xrs) encSIMD(vects [][]byte, rsOnly bool) (err error) {
 	// step1: reedsolomon encM
 	dv, pv := vects[:x.Data], vects[x.Data:]
 	size := len(vects[0])
-	start, end := 0, 0
+	start := 0
 	do := getDo(size)
 	for start < size {
-		end = start + do
+		end := start + do
 		if end <= size {
 			x.matrixMul(start, end, dv, pv)
 			start = end
@@ -93,6 +92,7 @@ func (x *xrs) encSIMD(vects [][]byte, rsOnly bool) (err error) {
 		return
 	}
 	// step2: xor a & f(b)
+	size = size / 2
 	for i, a := range x.xm {
 		v := make([][]byte, len(a)+1)
 		v[0] = vects[i][size : size*2]
@@ -205,7 +205,6 @@ func mulVectAddBase(c byte, a, b []byte) {
 func (x *xrs) encBase(vects [][]byte, rsOnly bool) (err error) {
 	d := x.Data
 	p := x.Parity
-	size := len(vects[0])
 	// step1: reedsolomon encM
 	dv := vects[:d]
 	pv := vects[d:]
@@ -223,6 +222,7 @@ func (x *xrs) encBase(vects [][]byte, rsOnly bool) (err error) {
 		return
 	}
 	// step2: xor a & f(b)
+	size := len(vects[0]) / 2
 	for i, a := range x.xm {
 		v := make([][]byte, len(a)+1)
 		v[0] = vects[i][size : size*2]

@@ -22,7 +22,7 @@ import (
 	"github.com/templexxx/cpufeat"
 )
 
-// Encoder implements for X-Reed-Solomon Encoding/Reconstructing
+// EncReconster implements for X-Reed-Solomon Encoding/Reconstructing
 // size of vects(vectors) must be equal
 // this interface can fit common Reed-Solomon Codes too
 type EncReconster interface {
@@ -39,6 +39,11 @@ type EncReconster interface {
 	Reconst(vects [][]byte, has, lost []int) error
 	// ReconstData only repair Data
 	ReconstData(vects [][]byte, has, lost []int) error
+	// VectsNeed receive lost index return a&parity_b vects' index that are needed for reconstructing
+	VectsNeed(lost int) (pb, a []int, err error)
+	// ReconstOne reconst one Data vect, it saves I/O
+	// Make sure you have some specific vects ( you can get the vects index from VectsNeed)
+	ReconstOne(vects [][]byte, lost int) (err error)
 }
 
 func checkCfg(d, p int) error {

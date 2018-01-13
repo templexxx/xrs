@@ -6,30 +6,56 @@ import (
 	"sort"
 )
 
-// if enableCache, search cache first
-// if not found generate one
-func (x *xrs) makeGen(has, lost []int) (gen []byte, err error) {
+func (x *xrs) makeGen(has, lost []int) (im, gen []byte, err error) {
 	d := x.Data
 	em := x.encM
+	nl := len(lost)
+	mBuf := make([]byte, 4*d*d+nl*d)
+	m := mBuf[:d*d]
+	for i, l := range has {
+		copy(m[i*d:i*d+d], em[l*d:l*d+d])
+	}
+	raw := mBuf[d*d : 3*d*d]
+	im = mBuf[3*d*d : 4*d*d] // inverse Matrix
+	err = matrix(m).invert(raw, d, im)
+	if err != nil {
+		return
+	}
+	gen = mBuf[4*d*d:]
+	for i, l := range lost {
+		copy(gen[i*d:i*d+d], im[l*d:l*d+d])
+	}
+	return
+}
+
+// TODO use this one
+// TODO drop all copy
+//func (x *xrs) getDecMatrix(has, lost []int) (im []byte, err error) {
+//	d := x.Data
+//	em := x.encM
+//	nl := len(lost)
+//	mBuf := make([]byte, 4*d*d+nl*d)
+//	m := mBuf[:d*d]
+//	for i, l := range has {
+//		copy(m[i*d:i*d+d], em[l*d:l*d+d])
+//	}
+//	raw := mBuf[d*d : 3*d*d]
+//	im = mBuf[3*d*d : 4*d*d] // inverse Matrix
+//	err = matrix(m).invert(raw, d, im)
+//	if err != nil {
+//		return
+//	}
+//	return
+//}
+
+// if enableCache, search cache first
+// if not found make one
+func (x *xrs) getGen(has, lost []int) (gen []byte, err error) {
+	d := x.Data
 	dl := len(lost)
 	if !x.enableCache {
-		mBuf := make([]byte, 4*d*d+dl*d)
-		m := mBuf[:d*d]
-		for i, l := range has {
-			copy(m[i*d:i*d+d], em[l*d:l*d+d])
-		}
-		raw := mBuf[d*d : 3*d*d]
-		im := mBuf[3*d*d : 4*d*d]
-		err2 := matrix(m).invert(raw, d, im)
-		if err2 != nil {
-			return nil, err2
-		}
-		g := mBuf[4*d*d:]
-		for i, l := range lost {
-			// TODO do I need copy here?
-			copy(g[i*d:i*d+d], im[l*d:l*d+d])
-		}
-		return g, nil
+		_, gen, err = x.makeGen(has, lost)
+		return
 	}
 	var ikey uint32
 	for _, p := range has {
@@ -38,29 +64,18 @@ func (x *xrs) makeGen(has, lost []int) (gen []byte, err error) {
 	v, ok := x.inverseCache.Load(ikey)
 	if ok {
 		im := v.([]byte)
-		g := make([]byte, dl*d)
+		gen = make([]byte, dl*d)
 		for i, l := range lost {
-			copy(g[i*d:i*d+d], im[l*d:l*d+d])
+			copy(gen[i*d:i*d+d], im[l*d:l*d+d])
 		}
-		return g, nil
+		return
 	}
-	mBuf := make([]byte, 4*d*d+dl*d)
-	m := mBuf[:d*d]
-	for i, l := range has {
-		copy(m[i*d:i*d+d], em[l*d:l*d+d])
-	}
-	raw := mBuf[d*d : 3*d*d]
-	im := mBuf[3*d*d : 4*d*d]
-	err2 := matrix(m).invert(raw, d, im)
-	if err2 != nil {
-		return nil, err2
+	im, gen, err := x.makeGen(has, lost)
+	if err != nil {
+		return
 	}
 	x.inverseCache.Store(ikey, im)
-	g := mBuf[4*d*d:]
-	for i, l := range lost {
-		copy(g[i*d:i*d+d], im[l*d:l*d+d])
-	}
-	return g, nil
+	return
 }
 
 func (x *xrs) rsReconstData(vects [][]byte, has, lost []int) (err error) {
@@ -73,7 +88,7 @@ func (x *xrs) rsReconstData(vects [][]byte, has, lost []int) (err error) {
 	for i, p := range lost {
 		v[i+d] = vects[p]
 	}
-	g, err := x.makeGen(has, lost)
+	g, err := x.getGen(has, lost)
 	if err != nil {
 		return
 	}
@@ -85,13 +100,13 @@ func (x *xrs) rsReconstData(vects [][]byte, has, lost []int) (err error) {
 	return
 }
 
-func (e *xrs) rsReconstParity(vects [][]byte, lost []int) (err error) {
-	d := e.data
+func (x *xrs) rsReconstParity(vects [][]byte, lost []int) (err error) {
+	d := x.Data
 	nl := len(lost)
 	v := make([][]byte, d+nl)
 	g := make([]byte, nl*d)
 	for i, l := range lost {
-		copy(g[i*d:i*d+d], e.encM[l*d:l*d+d])
+		copy(g[i*d:i*d+d], x.encM[l*d:l*d+d])
 	}
 	for i := 0; i < d; i++ {
 		v[i] = vects[i]
@@ -99,18 +114,18 @@ func (e *xrs) rsReconstParity(vects [][]byte, lost []int) (err error) {
 	for i, p := range lost {
 		v[i+d] = vects[p]
 	}
-	etmp := &encBase{data: d, parity: nl, gen: g}
-	err = etmp.Encode(v)
+	xTmp := &xrs{Data: d, Parity: nl, genM: g, ext: x.ext}
+	err = xTmp.enc(v, true)
 	if err != nil {
 		return
 	}
 	return
 }
 
-func (e *xrs) rsReconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) (err error) {
+func (x *xrs) rsReconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) (err error) {
 	dl := len(dLost)
 	if dl != 0 {
-		err = e.rsReconstData(vects, has, dLost)
+		err = x.rsReconstData(vects, has, dLost)
 		if err != nil {
 			return
 		}
@@ -120,7 +135,7 @@ func (e *xrs) rsReconst(vects [][]byte, has, dLost, pLost []int, dataOnly bool) 
 	}
 	pl := len(pLost)
 	if pl != 0 {
-		err = e.rsReconstParity(vects, pLost)
+		err = x.rsReconstParity(vects, pLost)
 		if err != nil {
 			return
 		}
@@ -163,6 +178,7 @@ func checkReconst(d, p int, has, dLost, pLost []int) (err error) {
 	return
 }
 
+// TODO drop sort, sort 代价多大？
 func spiltLost(d int, lost []int) (dLost, pLost []int) {
 	for _, l := range lost {
 		if l >= d {
@@ -176,58 +192,71 @@ func spiltLost(d int, lost []int) (dLost, pLost []int) {
 	return
 }
 
-func (e *xrs) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
-	dLost, pLost := spiltLost(e.data, lost)
-	err = checkReconst(e.data, e.parity, has, dLost, pLost)
+func (x *xrs) reconst(vects [][]byte, has, lost []int, dataOnly bool) (err error) {
+	dLost, pLost := spiltLost(x.Data, lost)
+	err = checkReconst(x.Data, x.Parity, has, dLost, pLost)
 	if err != nil {
 		return
 	}
 	sort.Ints(has)
-	mid := len(vects[has[0]])
-	// step1: repair a_vects
-	aV := make([][]byte, e.data+e.parity)
+	mid := len(vects[has[0]]) / 2
+	aV := make([][]byte, x.Data+x.Parity)
+	bV := make([][]byte, x.Data+x.Parity)
 	for i, v := range vects {
 		aV[i] = v[:mid]
+		bV[i] = v[mid:]
 	}
-	err = e.rsReconst(aV, has, dLost, pLost, dataOnly)
+
+	// step1: repair a_vects
+	err = x.rsReconst(aV, has, dLost, pLost, dataOnly)
 	if err != nil {
 		return
 	}
-	// step2: Parity back to f(b)
+	// step2: b_vects back to rs
 	for _, h := range has {
-		if h > e.data {
-			a := e.xm[h]
+		if h > x.Data {
+			a := x.xm[h]
 			xv := make([][]byte, len(a)+1)
-			xv[0] = vects[h][mid : mid*2]
+			xv[0] = vects[h][mid:]
 			for i, a0 := range a {
 				xv[i+1] = vects[a0][:mid]
 			}
-			xorBase(xv[0], xv)
+			bRS := make([]byte, mid)
+			bV[h] = bRS
+			encXOR(bRS, xv, x.ext)
 		}
 	}
-	// step3: repair b_vects
-	bV := make([][]byte, e.data+e.parity)
-	for i, v := range vects {
-		bV[i] = v[mid : mid*2]
-	}
-	err = e.rsReconst(bV, has, dLost, pLost, dataOnly)
+	// step3: repair b_vects (RS)
+	err = x.rsReconst(bV, has, dLost, pLost, dataOnly)
 	if err != nil {
 		return
+	}
+	// step4: xor a & f(b)
+	for _, l := range pLost {
+		if l > x.Data {
+			a := x.xm[l]
+			xv := make([][]byte, len(a)+1)
+			xv[0] = bV[l]
+			for i, a0 := range a {
+				xv[i+1] = vects[a0][:mid]
+			}
+			encXOR(vects[l][mid:], xv, x.ext)
+		}
 	}
 	return
 }
 
-func (e *xrs) Reconst(vects [][]byte, has, lost []int) error {
-	return e.reconst(vects, has, lost, false)
+func (x *xrs) Reconst(vects [][]byte, has, lost []int) error {
+	return x.reconst(vects, has, lost, false)
 }
 
-func (e *xrs) ReconstData(vects [][]byte, has, lost []int) error {
-	return e.reconst(vects, has, lost, true)
+func (x *xrs) ReconstData(vects [][]byte, has, lost []int) error {
+	return x.reconst(vects, has, lost, true)
 }
 
 func vectsNeed(d, lost int, xm map[int][]int) (pb, a []int, err error) {
 	if lost < 0 || lost >= d {
-		err = errors.New(fmt.Sprintf("xrs.VectsNeed: can't rsReconst vects[%d] by xor; numData is %d", lost, d))
+		err = fmt.Errorf("xrs.VectsNeed: can't rsReconst vects[%d] by xor; numData is %d", lost, d)
 		return
 	}
 	pb = make([]int, 2)
@@ -261,7 +290,7 @@ func (x *xrs) ReconstOne(vects [][]byte, lost int) (err error) {
 	// step1: recover b
 	d := x.Data
 	bVects := make([][]byte, d+x.Parity)
-	mid := len(vects) / 2
+	mid := len(vects[0]) / 2
 	for i, v := range vects {
 		bVects[i] = v[mid : mid*2]
 	}
@@ -280,16 +309,18 @@ func (x *xrs) ReconstOne(vects [][]byte, lost int) (err error) {
 	for i := 0; i < d; i++ {
 		bVTmp[i] = bVects[i]
 	}
-	bVTmp[d] = bVects[pb[1]]
+	bVTmp[d] = make([]byte, mid)
+	//bVTmp[d] = bVects[pb[1]]
 	g := make([]byte, d)
 	copy(g, x.encM[pb[1]*d:pb[1]*d+d])
 	xTmp := &xrs{Data: d, Parity: 1, genM: g, ext: x.ext}
 	xTmp.enc(bVTmp, true)
 	// step3: pb xor f(b)&vects[a].. = lost_a
-	xorV := make([][]byte, len(a)+1)
+	xorV := make([][]byte, len(a)+2)
 	xorV[0] = bVTmp[d]
+	xorV[1] = vects[pb[1]][mid:]
 	for i, a0 := range a {
-		xorV[i+1] = vects[a0][:mid]
+		xorV[i+2] = vects[a0][:mid]
 	}
 	encXOR(vects[lost][:mid], xorV, x.ext)
 	return

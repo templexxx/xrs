@@ -4,6 +4,7 @@ import "errors"
 
 type matrix []byte
 
+// TODO drop copy
 func genEncMatrixCauchy(d, p int) matrix {
 	t := d + p
 	m := make([]byte, t*d)
