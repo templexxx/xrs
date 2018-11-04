@@ -7,6 +7,7 @@ import (
 	xor "github.com/templexxx/xorsimd"
 )
 
+// XRS x-reedsolomon
 type XRS struct {
 	RS     *rs.RS
 	XORSet map[int][]int // xor_set map
@@ -61,7 +62,7 @@ func makeXORSet(d, p int, m map[int][]int) {
 func (x *XRS) Encode(vects [][]byte) (err error) {
 	size := len(vects[0])
 	if !((size & 1) == 0) {
-		err = errors.New(fmt.Sprintf("vect size not even: %d", size))
+		err = fmt.Errorf("vect size not even: %d", size)
 		return
 	}
 	err = x.RS.Encode(vects)
@@ -201,7 +202,7 @@ func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
 func (x *XRS) GetNeedVects(needReconst int) (aNeed, bNeed []int, err error) {
 	d, xs := x.RS.DataCnt, x.XORSet
 	if needReconst < 0 || needReconst >= d {
-		err = errors.New(fmt.Sprintf("illegal index: %d", needReconst))
+		err = fmt.Errorf("illegal index: %d", needReconst)
 		return
 	}
 	bNeed = make([]int, 2)

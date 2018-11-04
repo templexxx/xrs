@@ -276,8 +276,8 @@ func verifyUpdate(t *testing.T, d, p, updateRow int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		oldData, newData := make([]byte, size), make([]byte, size)
-		oldData = updateRet[updateRow]
+		newData := make([]byte, size)
+		oldData := updateRet[updateRow]
 		err = fillRandom(newData)
 		if err != nil {
 			t.Fatal(err)
