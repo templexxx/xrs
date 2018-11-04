@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	kb = 1 << 10
-	mb = 1 << 20
+	kb            = 1 << 10
+	mb            = 1 << 20
 	testDataCnt   = 10
 	testParityCnt = 4
 	// 128: avx_loop/sse_loop(RS&xor), 16: xmm_register(RS&xor)/general_register(xor), 8:general_register(xor), 1: byte by byte(RS&xor)
@@ -70,7 +70,7 @@ func verifyReconst(t *testing.T, d, p int) {
 				t.Fatal(err)
 			}
 		}
-		x,err := New(d, p)
+		x, err := New(d, p)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +144,7 @@ func testVerifyReconstPart(t *testing.T, d, p int, lost []int, needReconst int) 
 
 }
 
-func fillRandom(v []byte) (err error){
+func fillRandom(v []byte) (err error) {
 	_, err = io.ReadFull(crand.Reader, v)
 	return
 }
@@ -300,7 +300,7 @@ func verifyUpdate(t *testing.T, d, p, updateRow int) {
 }
 
 func BenchmarkEncode(b *testing.B) {
-	sizes := []int{4 * kb, 64*kb, mb}
+	sizes := []int{4 * kb, 64 * kb, mb}
 	b.Run("", benchEncRun(benchEnc, testDataCnt, testParityCnt, sizes))
 }
 
