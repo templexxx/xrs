@@ -52,5 +52,5 @@ DataCnt = 10; ParityCnt = 4
 ## Links & Deps
 * [ReedSolomon](https://github.com/templexxx/reedsolomon)
 * [XOR](https://github.com/templexxx/xorsimd)
-* [CPU Feature] (https://github.com/templexxx/cpu)
+* [CPU Feature](https://github.com/templexxx/cpu)
 
