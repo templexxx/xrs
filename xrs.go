@@ -1,65 +1,44 @@
-/*
-	X-Reed-Solomon Codes over GF(2^8)
-	Primitive Polynomial:  x^8+x^4+x^3+x^2+1
-	Galois Filed arithmetic using Intel SIMD instructions (AVX2 or SSSE3)
-	Platform: X86-64
-
-	xrs core ideas:
-	1. reed-solomon encode
-	2. split each vect into two equal pieces: a&b
-	3. xor some vects from a with f(b) (f(b) is the result of rs encode bVects)
-
-	More details:
-	docs/..
-*/
-
 package xrs
 
 import (
 	"errors"
-	"sync"
-
-	"github.com/templexxx/cpufeat"
+	"fmt"
+	rs "github.com/templexxx/reedsolomon"
+	xor "github.com/templexxx/xorsimd"
 )
 
-// EncReconster implements for X-Reed-Solomon Encoding/Reconstructing
-// size of vects(vectors) must be equal
-// this interface can fit common Reed-Solomon Codes too
-type EncReconster interface {
-	// Encode outputs Parity into vects
-	// each vect must has the same size && !=0 && !=odd
-	Encode(vects [][]byte) error
-	// Reconst repair missing vects (not just missing one Data vects)
-	// e.g:
-	// in 3+2, the whole index: [0,1,2,3,4]
-	// if vects[0,4] are lost
-	// the "has" will be [1,2,3] ,and you must be sure that vects[1] vects[2] vects[3] have correct Data
-	// len(has) must be equal with num_data
-	// results will be put into vects[0]&vects[4]
-	Reconst(vects [][]byte, has, lost []int) error
-	// ReconstData only repair Data
-	ReconstData(vects [][]byte, has, lost []int) error
-	// VectsNeed receive lost index return a&parity_b vects' index that are needed for reconstructing
-	VectsNeed(lost int) (pb, a []int, err error)
-	// ReconstOne reconst one Data vect, it saves I/O
-	// Make sure you have some specific vects ( you can get the vects index from VectsNeed)
-	ReconstOne(vects [][]byte, lost int) (err error)
+type XRS struct {
+	RS     *rs.RS
+	XORSet map[int][]int // xor_set map
 }
 
-func checkCfg(d, p int) error {
-	if (d <= 0) || (p <= 0) {
-		return errors.New("xrs.checkCfg: Data or Parity <= 0")
+// New create an XRS
+//
+// parityCnt can't be 1
+func New(dataCnt, parityCnt int) (x *XRS, err error) {
+	if parityCnt == 1 {
+		err = errors.New("illegal parity")
+		return
 	}
-	if d+p >= 256 {
-		return errors.New("xrs.checkCfg: Data+Parity >= 256")
+	r, err := rs.New(dataCnt, parityCnt)
+	if err != nil {
+		return
 	}
-	return nil
+	xs := make(map[int][]int)
+	makeXORSet(dataCnt, parityCnt, xs)
+	x = &XRS{RS: r, XORSet: xs}
+	return
 }
 
-// generator xor_map <vects_index>:<data_a_index_list>
-// e.g. 10+4
-// 11:[0 3 6 9] 12:[1 4 7] 13:[2 5 8]
-func genXM(d, p int, m map[int][]int) {
+/*
+	<vects_index>:<data_a_index_list>
+	e.g. 10+4
+	11:[0 3 6 9] 12:[1 4 7] 13:[2 5 8]
+ 	b-11 ⊕ a-0 ⊕ a-3 ⊕ a-6 ⊕ a-9 = new_b-11
+ 	b-12 ⊕ a-1 ⊕ a-4 ⊕ a-7 = new_b-12
+	b-13 ⊕ a-2 ⊕ a-5 ⊕ a-8 = new_b-13
+*/
+func makeXORSet(d, p int, m map[int][]int) {
 	a := 0
 	for {
 		if a == d {
@@ -78,81 +57,190 @@ func genXM(d, p int, m map[int][]int) {
 	return
 }
 
-// SIMD Instruction Extensions
-const (
-	none = iota
-	ssse3
-	avx2
-)
-
-func getEXT() int {
-	if cpufeat.X86.HasAVX2 {
-		return avx2
-	} else if cpufeat.X86.HasSSSE3 {
-		return ssse3
-	} else {
-		return none
+// Encode outputs parity into vects
+func (x *XRS) Encode(vects [][]byte) (err error) {
+	size := len(vects[0])
+	if !((size & 1) == 0) {
+		err = errors.New(fmt.Sprintf("vect size not even: %d", size))
+		return
 	}
+	err = x.RS.Encode(vects)
+	if err != nil {
+		return
+	}
+
+	half := size / 2
+	for i, a := range x.XORSet {
+		v := make([][]byte, len(a)+1)
+		v[0] = vects[i][half:]
+		for i, k := range a {
+			v[i+1] = vects[k][:half]
+		}
+		xor.Encode(vects[i][half:], v)
+	}
+	return
 }
 
-// TODO Data 可以被其它包直接引用吗？
-type (
-	xrs struct {
-		Data   int
-		Parity int
-		ext    int    // cpu extension
-		encM   matrix // encoding matrix
-		genM   matrix // generator matrix
-		xm     map[int][]int
-		// TODO need _padding here?
-		enableCache  bool // save time for calculating inverse matrix
-		inverseCache sync.Map
+// Update parity when one data_vect changes
+func (x *XRS) Update(oldData, newData []byte, updateRow int, parity [][]byte) (err error) {
+	err = x.RS.Update(oldData, newData, updateRow, parity)
+	if err != nil {
+		return
 	}
-	// TODO maybe put it into xrs
-	//encFunc struct {
-	//	mulVectAddBase func(tbl, d, p []byte)
-	//	mulVectBase    func(tbl, d, p []byte)
-	//	xor        func(dst []byte, src [][]byte)
-	//}
-)
 
-// TODO change the limits
-// At most 3060 inverse matrix (when Data=14, Parity=4, calc by github.com/templexxx/reedsolomon/mathtool/cntinverse)
-// In practice,  Data usually below 12, Parity below 5
-func okCache(data, parity int) bool {
-	if data < 15 && parity < 5 { // you can change it, but the Data+Parity can't be bigger than 32 (tips: see the codes about make inverse matrix)
-		return true
+	_, bNeed, err := x.GetNeedVects(updateRow)
+	if err != nil {
+		return
+	}
+	half := len(oldData) / 2
+	xor.Update(oldData[:half], newData[:half], parity[bNeed[1]-x.RS.DataCnt][half:])
+	return
+}
+
+// Reconst repair missing vects, len(dpHas) must == dataCnt
+// It's not the most efficient way to reconst only one lost, pls use reconstOne if only lost one data_vect
+// e.g:
+// in 3+2, the whole index: [0,1,2,3,4]
+// if vects[0,4] are lost
+// the "dpHas" will be [1,2,3] ,and you must be sure that vects[1] vects[2] vects[3] have correct data
+// results will be put into vects[0]&vects[4]
+//
+// if you don't want reconst parity, needReconst will be [0], and it will repair vects[0] only
+func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
+	// vects: [A|B]
+	// step1: reconst all lost A
+	half := len(vects[dpHas[0]]) / 2
+	vectsA := make([][]byte, len(vects))
+	for i := range vects {
+		vectsA[i] = vects[i][:half]
+	}
+	aLost := make([]int, 0)
+	for i := 0; i < x.RS.DataCnt+x.RS.ParityCnt; i++ {
+		if !isIn(i, dpHas) {
+			aLost = append(aLost, i)
+		}
+	}
+	err = x.RS.Reconst(vectsA, dpHas, aLost)
+	if err != nil {
+		return
+	}
+	// step2: B -> rs_codes
+	err = x.retrieveRS(half, dpHas, vects)
+	if err != nil {
+		return
+	}
+	// step3: reconst B
+	vectsB := make([][]byte, len(vects))
+	for i := range vects {
+		vectsB[i] = vects[i][half:]
+	}
+	err = x.RS.Reconst(vectsB, dpHas, needReconst)
+	if err != nil {
+		return
+	}
+
+	// step4: xor B (if need reconst)
+	d := x.RS.DataCnt
+	_, pn := rs.SplitNeedReconst(d, needReconst)
+	if len(pn) != 0 {
+		if len(pn) == 1 && pn[0] == d {
+			return nil
+		}
+		for _, p := range pn {
+			if p != d {
+				xs := x.XORSet[p]
+				xv := make([][]byte, len(xs)+1)
+				xv[0] = vects[p][half:]
+				for k, e := range xs {
+					xv[k+1] = vects[e][:half]
+				}
+				xor.Encode(vects[p][half:], xv)
+			}
+		}
+	}
+	return nil
+}
+
+// ReconstOne reconst one data vect, it saves I/O
+// Make sure you have some specific vects ( you can get the vects index from GetNeedVects)
+func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
+	aNeed, bNeed, err := x.GetNeedVects(needReconst) // help with checking needReconst index
+	if err != nil {
+		return
+	}
+	// step1: reconst b_data & bNeed[1] -> original rs_codes
+	d := x.RS.DataCnt
+	bVects := make([][]byte, len(vects))
+	half := len(vects[0]) / 2
+	for i, v := range vects {
+		bVects[i] = v[half:]
+	}
+	bHas := make([]int, d)
+	for i := 0; i < d; i++ {
+		bHas[i] = i
+	}
+	bHas[needReconst] = d
+	bRSV := make([]byte, half)
+	bVects[bNeed[1]] = bRSV
+	err = x.RS.Reconst(bVects, bHas, []int{needReconst, bNeed[1]})
+	if err != nil {
+		return
+	}
+	// step2: reconst a_lost
+	aXorV := make([][]byte, len(aNeed)+2)
+	aXorV[0] = vects[bNeed[1]][half:]
+	aXorV[1] = bRSV
+	for i, a0 := range aNeed {
+		aXorV[i+2] = vects[a0][:half]
+	}
+	xor.Encode(vects[needReconst][:half], aXorV)
+	return
+}
+
+// GetNeedVects receive needReconst index return a&b vects' index for reconstructing
+func (x *XRS) GetNeedVects(needReconst int) (aNeed, bNeed []int, err error) {
+	d, xs := x.RS.DataCnt, x.XORSet
+	if needReconst < 0 || needReconst >= d {
+		err = errors.New(fmt.Sprintf("illegal index: %d", needReconst))
+		return
+	}
+	bNeed = make([]int, 2)
+	bNeed[0] = d // must has b_vects[d]
+	for k, s := range xs {
+		if isIn(needReconst, s) {
+			bNeed[1] = k
+			break
+		}
+	}
+	for _, v := range xs[bNeed[1]] {
+		if v != needReconst {
+			aNeed = append(aNeed, v)
+		}
+	}
+	return
+}
+
+// xor a_vects & b_vect -> rs_codes
+func (x *XRS) retrieveRS(half int, dpHas []int, vects [][]byte) (err error) {
+	for _, h := range dpHas {
+		if h > x.RS.DataCnt { // vects[data] is rs_codes
+			a := x.XORSet[h]
+			xv := make([][]byte, len(a)+1)
+			xv[0] = vects[h][half:] // put B first
+			for i, a0 := range a {
+				xv[i+1] = vects[a0][:half]
+			}
+			xor.Encode(vects[h][half:], xv)
+		}
+	}
+	return
+}
+
+func isIn(e int, s []int) bool {
+	for _, v := range s {
+		if e == v {
+			return true
+		}
 	}
 	return false
-}
-
-// TODO pointer or ？
-func newXRS(d, p int, em matrix) (enc EncReconster) {
-	g := em[d*d:]
-	m := make(map[int][]int)
-	genXM(d, p, m)
-	return &xrs{Data: d, Parity: p, ext: getEXT(), encM: em, genM: g, xm: m, enableCache: okCache(d, p)}
-}
-
-// New create an Encoder (vandermonde matrix)
-func New(data, parity int) (enc EncReconster, err error) {
-	err = checkCfg(data, parity)
-	if err != nil {
-		return
-	}
-	e, err := genEncMatrixVand(data, parity)
-	if err != nil {
-		return
-	}
-	return newXRS(data, parity, e), nil
-}
-
-// NewCauchy create an Encoder (cauchy matrix)
-func NewCauchy(data, parity int) (enc EncReconster, err error) {
-	err = checkCfg(data, parity)
-	if err != nil {
-		return
-	}
-	e := genEncMatrixCauchy(data, parity)
-	return newXRS(data, parity, e), nil
 }
