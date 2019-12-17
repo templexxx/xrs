@@ -1,0 +1,6 @@
+github.com/templexxx/cpu v0.0.1 h1:hY4WdLOgKdc8y13EYklu9OUTXik80BkxHoWvTO6MQQY=
+github.com/templexxx/cpu v0.0.1/go.mod h1:w7Tb+7qgcAlIyX4NhLuDKt78AHA5SzPmq0Wj6HiEnnk=
+github.com/templexxx/reedsolomon v1.1.3 h1:UJZtgOAcp8Ldl9Qp9/8YIPHfW58vsUrPHcJYv15Na50=
+github.com/templexxx/reedsolomon v1.1.3/go.mod h1:lCyQlNrc8GTWsFE47kSLkJJvsGL8Lo5pfUDPiJZMm3o=
+github.com/templexxx/xorsimd v0.1.1 h1:Y4e8YgMx/4xRJO4G6lq0bSswfDCxbIrGu7KqM2ET524=
+github.com/templexxx/xorsimd v0.1.1/go.mod h1:W+ffZz8jJMH2SXwuKu9WhygqBMbFnp14G2fqEr8qaNo=

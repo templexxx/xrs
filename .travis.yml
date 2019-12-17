@@ -1,9 +1,0 @@
-language: go
-go:
-    - 1.11.x
-
-install:
-    - go get github.com/templexxx/xrs
-
-script:
-    - go test -v
