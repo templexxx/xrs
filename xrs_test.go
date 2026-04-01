@@ -22,7 +22,7 @@ const (
 	testSize      = 1024
 )
 
-// We need the result to be as same as old one.
+// We need the result to be as same as the old one.
 func TestMakeXORSet(t *testing.T) {
 	for d := 1; d <= 255; d++ {
 		for p := 2; p <= 255; p++ {
