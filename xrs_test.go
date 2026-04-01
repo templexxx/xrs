@@ -15,12 +15,37 @@ import (
 )
 
 const (
-	kb            = 1 << 10
-	mb            = 1 << 20
-	testDataNum   = 12
-	testParityNum = 4
-	testSize      = 1024
+	kb = 1 << 10
+	mb = 1 << 20
+
+	testDataShards   = 12
+	testParityShards = 4
+	testShardSize    = 1024
 )
+
+func newTestRand(tb testing.TB) *rand.Rand {
+	tb.Helper()
+
+	seed := time.Now().UnixNano()
+	return rand.New(rand.NewSource(seed))
+}
+
+func newShardMatrix(shards, size int) [][]byte {
+	matrix := make([][]byte, shards)
+	for i := range matrix {
+		matrix[i] = make([]byte, size)
+	}
+
+	return matrix
+}
+
+func fillRandom(tb testing.TB, r *rand.Rand, data []byte) {
+	tb.Helper()
+
+	if _, err := r.Read(data); err != nil {
+		tb.Fatal(err)
+	}
+}
 
 // We need the result to be as same as the old one.
 func TestMakeXORSet(t *testing.T) {
@@ -71,8 +96,6 @@ func makeXORSetOld(d, p int, m map[int][]int) {
 			a++
 		}
 	}
-
-	return
 }
 
 // Powered by MATLAB
@@ -133,25 +156,21 @@ func TestXRS_GetNeedVects(t *testing.T) {
 }
 
 func TestXRS_ReconstOne(t *testing.T) {
-	testReconstOne(t, testDataNum, testParityNum, 2)
+	testReconstOne(t, testDataShards, testParityShards, 2)
 }
 
-func testReconstOne(t *testing.T, d, p, size int) {
-	rand.Seed(time.Now().UnixNano())
+func testReconstOne(t *testing.T, dataShards, parityShards, size int) {
+	r := newTestRand(t)
 
-	for lost := 0; lost < d; lost++ {
+	for lost := 0; lost < dataShards; lost++ {
 
 		// init expect, result
-		expect := make([][]byte, d+p)
-		result := make([][]byte, d+p)
-		for j := 0; j < d+p; j++ {
-			expect[j] = make([]byte, size)
-			result[j] = make([]byte, size)
+		expect := newShardMatrix(dataShards+parityShards, size)
+		result := newShardMatrix(dataShards+parityShards, size)
+		for j := 0; j < dataShards; j++ {
+			fillRandom(t, r, expect[j])
 		}
-		for j := 0; j < d; j++ {
-			fillRandom(expect[j])
-		}
-		x, err := New(d, p)
+		x, err := New(dataShards, parityShards)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +178,7 @@ func testReconstOne(t *testing.T, d, p, size int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for j := 0; j < d+p; j++ {
+		for j := 0; j < dataShards+parityShards; j++ {
 			copy(result[j], expect[j])
 		}
 
@@ -168,7 +187,7 @@ func testReconstOne(t *testing.T, d, p, size int) {
 		needReconst := lost
 		result[needReconst] = make([]byte, size)
 		// Clean A & B.
-		aVects, bVects := make([][]byte, d+p), make([][]byte, d+p)
+		aVects, bVects := make([][]byte, dataShards+parityShards), make([][]byte, dataShards+parityShards)
 		half := size / 2
 		for j := range result {
 			aVects[j], bVects[j] = result[j][:half], result[j][half:]
@@ -185,7 +204,7 @@ func testReconstOne(t *testing.T, d, p, size int) {
 		}
 		// Clean B.
 		bVects[needReconst] = make([]byte, size)
-		for j := d; j < d+p; j++ {
+		for j := dataShards; j < dataShards+parityShards; j++ {
 			if !isIn(j, bNeed) {
 				bVects[j] = make([]byte, half)
 			}
@@ -207,33 +226,27 @@ func testReconstOne(t *testing.T, d, p, size int) {
 	}
 }
 
-func fillRandom(p []byte) {
-	rand.Read(p)
-}
-
-func TestXRS_retrieveRS(t *testing.T) {
-	d, p := testDataNum, testParityNum
+func TestXRS_RetrieveRS(t *testing.T) {
+	d, p := testDataShards, testParityShards
 	x, err := New(d, p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rand.Seed(time.Now().UnixNano())
+	r := newTestRand(t)
 
-	vects := make([][]byte, d+p)
-	results := make([][]byte, d+p)
+	vects := newShardMatrix(d+p, testShardSize)
+	results := newShardMatrix(d+p, testShardSize)
 	for i := range vects {
-		vects[i] = make([]byte, testSize)
-		results[i] = make([]byte, testSize)
-		fillRandom(vects[i])
+		fillRandom(t, r, vects[i])
 		copy(results[i], vects[i])
 	}
 
-	err = x.retrieveRS(results, rand.Perm(d+p))
+	err = x.retrieveRS(results, r.Perm(d+p))
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = x.retrieveRS(results, rand.Perm(d+p))
+	err = x.retrieveRS(results, r.Perm(d+p))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,24 +259,20 @@ func TestXRS_retrieveRS(t *testing.T) {
 }
 
 func TestXRS_Reconst(t *testing.T) {
-	testReconst(t, testDataNum, testParityNum, testSize, 128)
+	testReconst(t, testDataShards, testParityShards, testShardSize, 128)
 }
 
-func testReconst(t *testing.T, d, p, size, loop int) {
-
-	rand.Seed(time.Now().UnixNano())
+func testReconst(t *testing.T, dataShards, parityShards, size, loop int) {
+	r := newTestRand(t)
 
 	for i := 0; i < loop; i++ {
-		exp := make([][]byte, d+p)
-		act := make([][]byte, d+p)
-		for j := 0; j < d+p; j++ {
-			exp[j], act[j] = make([]byte, size), make([]byte, size)
-		}
-		for j := 0; j < d; j++ {
-			fillRandom(exp[j])
+		exp := newShardMatrix(dataShards+parityShards, size)
+		act := newShardMatrix(dataShards+parityShards, size)
+		for j := 0; j < dataShards; j++ {
+			fillRandom(t, r, exp[j])
 		}
 
-		x, err := New(d, p)
+		x, err := New(dataShards, parityShards)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,12 +281,12 @@ func testReconst(t *testing.T, d, p, size, loop int) {
 			t.Fatal(err)
 		}
 
-		lost := makeLostRandom(d+p, rand.Intn(p+1))
-		needReconst := lost[:rand.Intn(len(lost)+1)]
+		lost := makeLostRandom(r, dataShards+parityShards, r.Intn(parityShards+1))
+		needReconst := lost[:r.Intn(len(lost)+1)]
 		if len(needReconst) == 1 {
 			lost = needReconst // Make sure to have correct data for reconstOne.
 		}
-		dpHas := makeHasFromLost(d+p, lost)
+		dpHas := makeHasFromLost(dataShards+parityShards, lost)
 		for _, h := range dpHas {
 			copy(act[h], exp[h])
 		}
@@ -286,7 +295,7 @@ func testReconst(t *testing.T, d, p, size, loop int) {
 		// Although we want to reconstruct these vectors,
 		// but it maybe a mistake.
 		for _, nr := range needReconst {
-			if rand.Intn(4) == 0 { // 1/4 chance.
+			if r.Intn(4) == 0 { // 1/4 chance.
 				copy(act[nr], exp[nr])
 			}
 		}
@@ -305,25 +314,21 @@ func testReconst(t *testing.T, d, p, size, loop int) {
 }
 
 func TestXRS_Update(t *testing.T) {
-	testUpdate(t, testDataNum, testParityNum, testSize)
+	testUpdate(t, testDataShards, testParityShards, testShardSize)
 }
 
-func testUpdate(t *testing.T, d, p, size int) {
+func testUpdate(t *testing.T, dataShards, parityShards, size int) {
+	r := newTestRand(t)
 
-	rand.Seed(time.Now().UnixNano())
-
-	for i := 0; i < d; i++ {
-		act := make([][]byte, d+p)
-		exp := make([][]byte, d+p)
-		for j := 0; j < d+p; j++ {
-			act[j], exp[j] = make([]byte, size), make([]byte, size)
-		}
-		for j := 0; j < d; j++ {
-			fillRandom(exp[j])
+	for i := 0; i < dataShards; i++ {
+		act := newShardMatrix(dataShards+parityShards, size)
+		exp := newShardMatrix(dataShards+parityShards, size)
+		for j := 0; j < dataShards; j++ {
+			fillRandom(t, r, exp[j])
 			copy(act[j], exp[j])
 		}
 
-		x, err := New(d, p)
+		x, err := New(dataShards, parityShards)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -333,9 +338,9 @@ func testUpdate(t *testing.T, d, p, size int) {
 		}
 
 		newData := make([]byte, size)
-		fillRandom(newData)
+		fillRandom(t, r, newData)
 		updateRow := i
-		err = x.Update(act[updateRow], newData, updateRow, act[d:d+p])
+		err = x.Update(act[updateRow], newData, updateRow, act[dataShards:dataShards+parityShards])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -345,7 +350,7 @@ func testUpdate(t *testing.T, d, p, size int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for j := d; j < d+p; j++ {
+		for j := dataShards; j < dataShards+parityShards; j++ {
 			if !bytes.Equal(act[j], exp[j]) {
 				t.Fatalf("update failed: vect: %d, size: %d", j, size)
 			}
@@ -354,23 +359,19 @@ func testUpdate(t *testing.T, d, p, size int) {
 }
 
 func TestXRS_Replace(t *testing.T) {
-	testReplace(t, testDataNum, testParityNum, testSize, 1024, true)
-	testReplace(t, testDataNum, testParityNum, testSize, 1024, false)
+	testReplace(t, testDataShards, testParityShards, testShardSize, 1024, true)
+	testReplace(t, testDataShards, testParityShards, testShardSize, 1024, false)
 }
 
-func testReplace(t *testing.T, d, p, size, loop int, toZero bool) {
-
-	rand.Seed(time.Now().UnixNano())
+func testReplace(t *testing.T, dataShards, parityShards, size, loop int, toZero bool) {
+	r := newTestRand(t)
 
 	for i := 0; i < loop; i++ {
-		replaceRows := makeReplaceRowRandom(d)
-		act := make([][]byte, d+p)
-		exp := make([][]byte, d+p)
-		for j := 0; j < d+p; j++ {
-			act[j], exp[j] = make([]byte, size), make([]byte, size)
-		}
-		for j := 0; j < d; j++ {
-			fillRandom(exp[j])
+		replaceRows := makeReplaceRowsRandom(r, dataShards)
+		act := newShardMatrix(dataShards+parityShards, size)
+		exp := newShardMatrix(dataShards+parityShards, size)
+		for j := 0; j < dataShards; j++ {
+			fillRandom(t, r, exp[j])
 			copy(act[j], exp[j])
 		}
 
@@ -386,7 +387,7 @@ func testReplace(t *testing.T, d, p, size, loop int, toZero bool) {
 			}
 		}
 
-		x, err := New(d, p)
+		x, err := New(dataShards, parityShards)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -405,32 +406,29 @@ func testReplace(t *testing.T, d, p, size, loop int, toZero bool) {
 			t.Fatal(err)
 		}
 
-		err = x.Replace(data, replaceRows, act[d:])
+		err = x.Replace(data, replaceRows, act[dataShards:])
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		for j := d; j < d+p; j++ {
+		for j := dataShards; j < dataShards+parityShards; j++ {
 			if !bytes.Equal(act[j], exp[j]) {
-				fmt.Println(replaceRows)
-				t.Fatalf("replace failed: vect: %d, size: %d", j, size)
+				t.Fatalf("replace failed: vect: %d, size: %d, rows: %v", j, size, replaceRows)
 			}
 		}
 
 	}
 }
 
-func makeReplaceRowRandom(d int) []int {
-	rand.Seed(time.Now().UnixNano())
-
-	n := rand.Intn(d + 1)
+func makeReplaceRowsRandom(r *rand.Rand, dataShards int) []int {
+	n := r.Intn(dataShards + 1)
 	s := make([]int, 0)
 	c := 0
 	for i := 0; i < 64; i++ {
 		if c == n {
 			break
 		}
-		v := rand.Intn(d)
+		v := r.Intn(dataShards)
 		if !isIn(v, s) {
 			s = append(s, v)
 			c++
@@ -442,15 +440,14 @@ func makeReplaceRowRandom(d int) []int {
 	return s
 }
 
-func makeLostRandom(n, lostN int) []int {
+func makeLostRandom(r *rand.Rand, n, lostN int) []int {
 	l := make([]int, lostN)
-	rand.Seed(time.Now().UnixNano())
 	c := 0
 	for {
 		if c == lostN {
 			break
 		}
-		v := rand.Intn(n)
+		v := r.Intn(n)
 		if !isIn(v, l) {
 			l[c] = v
 			c++
@@ -473,7 +470,7 @@ func makeHasFromLost(n int, lost []int) []int {
 
 func BenchmarkXRS_Encode(b *testing.B) {
 	dps := [][]int{
-		[]int{12, 4},
+		{12, 4},
 	}
 
 	sizes := []int{
@@ -504,8 +501,9 @@ func benchEnc(b *testing.B, d, p, size int) {
 	for j := 0; j < d+p; j++ {
 		vects[j] = make([]byte, size)
 	}
+	r := newTestRand(b)
 	for j := 0; j < d; j++ {
-		fillRandom(vects[j])
+		fillRandom(b, r, vects[j])
 	}
 	x, err := New(d, p)
 	if err != nil {
@@ -551,8 +549,9 @@ func benchReconst(b *testing.B, d, p, size int, dpHas, needReconst []int) {
 	for j := 0; j < d+p; j++ {
 		vects[j] = make([]byte, size)
 	}
+	r := newTestRand(b)
 	for j := 0; j < d; j++ {
-		fillRandom(vects[j])
+		fillRandom(b, r, vects[j])
 	}
 	x, err := New(d, p)
 	if err != nil {
@@ -592,7 +591,7 @@ func BenchmarkXRS_Update(b *testing.B) {
 func benchmarkUpdate(f func(*testing.B, int, int, int, int), d, p, size int) func(*testing.B) {
 
 	return func(b *testing.B) {
-		updateRow := rand.Intn(d)
+		updateRow := newTestRand(b).Intn(d)
 		b.Run(fmt.Sprintf("(%d+%d)-%s",
 			d, p, byteToStr(size)),
 			func(b *testing.B) { f(b, d, p, size, updateRow) })
@@ -604,8 +603,9 @@ func benchUpdate(b *testing.B, d, p, size, updateRow int) {
 	for j := 0; j < d+p; j++ {
 		vects[j] = make([]byte, size)
 	}
+	r := newTestRand(b)
 	for j := 0; j < d; j++ {
-		fillRandom(vects[j])
+		fillRandom(b, r, vects[j])
 	}
 	x, err := New(d, p)
 	if err != nil {
@@ -617,7 +617,7 @@ func benchUpdate(b *testing.B, d, p, size, updateRow int) {
 	}
 
 	newData := make([]byte, size)
-	fillRandom(newData)
+	fillRandom(b, r, newData)
 
 	b.SetBytes(int64((p + 2 + p) * size))
 	b.ResetTimer()
@@ -652,8 +652,9 @@ func benchReplace(b *testing.B, d, p, size, n int) {
 	for j := 0; j < d+p; j++ {
 		vects[j] = make([]byte, size)
 	}
+	r := newTestRand(b)
 	for j := 0; j < d; j++ {
-		fillRandom(vects[j])
+		fillRandom(b, r, vects[j])
 	}
 	x, err := New(d, p)
 	if err != nil {
