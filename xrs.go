@@ -3,10 +3,12 @@
 // Use of this source code is governed by the MIT License
 // that can be found in the LICENSE file.
 
-// Package xrs implements Erasure Codes based on
-// <A “Hitchhiker’s” Guide to Fast and Efﬁcient Data Reconstruction in Erasure-coded Data Centers>,
-// split row vectors into two equal size parts:
-// e.g. 10+4:
+// Package xrs implements erasure codes based on
+// "A Hitchhiker's Guide to Fast and Efficient Data Reconstruction in
+// Erasure-coded Data Centers".
+//
+// XRS splits each row vector into two equal-sized parts.
+// Example: 10+4:
 // +---------+
 // | a1 | b1 |
 // +---------+
@@ -36,21 +38,20 @@ import (
 	xor "github.com/templexxx/xorsimd"
 )
 
-// XRS X-Reed-Solomon Codes receiver.
+// XRS is the X-Reed-Solomon codec.
 type XRS struct {
-	// RS is the backend of XRS>
+	// RS is the backend Reed-Solomon codec.
 	RS *rs.RS
-	// XORSet shows how XRS combines sub-vectors by xor.
+	// XORSet describes how XRS combines subvectors with XOR.
 	//
-	// Key: Parity index(except first parity).
-	// Value: Data indexes.
+	// Key: parity index (excluding the first parity shard).
+	// Value: data indexes.
 	XORSet map[int][]int
 }
 
-// New create an XRS with specific data and parity numbers.
+// New creates an XRS codec with the given data and parity shard counts.
 //
-// Warn:
-// parityNum can't be 1.
+// parityNum cannot be 1.
 func New(dataNum, parityNum int) (x *XRS, err error) {
 	if parityNum == 1 {
 		err = errors.New("illegal parity")
@@ -68,19 +69,19 @@ func New(dataNum, parityNum int) (x *XRS, err error) {
 
 // e.g., 10+4:
 //
-// We will have this xor_set: 11:[0 3 6 9] 12:[1 4 7] 13:[2 5 8],
+// The resulting XOR set is: 11:[0 3 6 9] 12:[1 4 7] 13:[2 5 8],
 // which means:
 // b11 ⊕ a0 ⊕ a3 ⊕ a6 ⊕ a9 = new_b11
 // b12 ⊕ a1 ⊕ a4 ⊕ a7 = new_b12
 // b13 ⊕ a2 ⊕ a5 ⊕ a8 = new_b13
 func makeXORSet(d, p int, m map[int][]int) {
 
-	// Init map.
+	// Initialize map.
 	for i := d + 1; i < d+p; i++ {
 		m[i] = make([]int, 0)
 	}
 
-	// Fill map.
+	// Populate map.
 	j := d + 1
 	for i := 0; i < d; i++ {
 		if j > d+p-1 {
@@ -90,7 +91,7 @@ func makeXORSet(d, p int, m map[int][]int) {
 		j++
 	}
 
-	// Clean map.
+	// Remove empty entries.
 	for k, v := range m {
 		if len(v) == 0 {
 			delete(m, k)
@@ -98,8 +99,7 @@ func makeXORSet(d, p int, m map[int][]int) {
 	}
 }
 
-// Encode encodes data for generating parity.
-// Write parity vectors into vects[r.DataNum:].
+// Encode encodes data and writes parity vectors into vects[r.DataNum:].
 func (x *XRS) Encode(vects [][]byte) (err error) {
 
 	err = checkSize(vects[0])
@@ -108,13 +108,13 @@ func (x *XRS) Encode(vects [][]byte) (err error) {
 	}
 	size := len(vects[0])
 
-	// Step1: Reed-Solomon encode.
+	// Step 1: Reed-Solomon encode.
 	err = x.RS.Encode(vects)
 	if err != nil {
 		return
 	}
 
-	// Step2: XOR by xor_set.
+	// Step 2: XOR based on XORSet.
 	half := size / 2
 	for bi, xs := range x.XORSet {
 		xv := make([][]byte, len(xs)+1)
@@ -135,11 +135,14 @@ func checkSize(vect []byte) error {
 	return nil
 }
 
-// GetNeedVects receives needReconst index (it must be a data vector)
-// returns a_vectors' indexes and b_parity_vectors' indexes for reconstructing needReconst.
-// It's used for ReconstOne to read correct vectors for saving I/O.
+// GetNeedVects takes needReconst (which must be a data index) and returns:
+// 1) a-vector indexes
+// 2) b-parity-vector indexes
+// required to reconstruct needReconst.
 //
-// bNeed always has two elements, the first one is DataNum.
+// It is used by ReconstOne to reduce reconstruction I/O.
+//
+// bNeed always has two elements, and the first is DataNum.
 func (x *XRS) GetNeedVects(needReconst int) (aNeed, bNeed []int, err error) {
 	d := x.RS.DataNum
 	if needReconst < 0 || needReconst >= d {
@@ -158,7 +161,7 @@ func (x *XRS) GetNeedVects(needReconst int) (aNeed, bNeed []int, err error) {
 		}
 	}
 
-	// Get a (except needReconst).
+	// Get a (excluding needReconst).
 	for _, i := range xs[bNeed[1]] {
 		if i != needReconst {
 			aNeed = append(aNeed, i)
@@ -167,8 +170,8 @@ func (x *XRS) GetNeedVects(needReconst int) (aNeed, bNeed []int, err error) {
 	return
 }
 
-// ReconstOne reconstruct one data vector, it saves I/O.
-// Make sure you have some specific vectors' data. (you can get the vectors' indexes from GetNeedVects)
+// ReconstOne reconstructs a single data vector with reduced I/O.
+// Ensure required vectors are available (see GetNeedVects).
 func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
 
 	err = checkSize(vects[0])
@@ -181,7 +184,7 @@ func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
 		return
 	}
 
-	// Step1: Reconstruct b_needReconst & rs(bNeed[1]), using original Reed-Solomon Codes.
+	// Step 1: Reconstruct b_needReconst and rs(bNeed[1]) using Reed-Solomon.
 	bVects := make([][]byte, len(vects))
 	half := len(vects[0]) / 2
 	for i, v := range vects {
@@ -204,7 +207,7 @@ func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
 		return
 	}
 
-	// Step2: Reconstruct a_needReconst
+	// Step 2: Reconstruct a_needReconst.
 	// ∵ a_needReconst ⊕ a_need ⊕ bRS = vects[bi]
 	// ∴ a_needReconst = vects[bi] ⊕ bRS ⊕ a_need
 	xorV := make([][]byte, len(aNeed)+2)
@@ -217,21 +220,19 @@ func (x *XRS) ReconstOne(vects [][]byte, needReconst int) (err error) {
 	return
 }
 
-// Reconst reconstructs missing vectors,
+// Reconst reconstructs missing vectors.
 // vects: All vectors, len(vects) = dataNum + parityNum.
 // dpHas: Survived data and parity index, need dataNum indexes at least.
 // needReconst: Vectors indexes which need to be reconstructed.
 //
-// Warn:
-// If there is only one needReconst, it will call ReconstOne,
-// so make sure you have correct data, if there is only one vectors need to repair.
+// If there is exactly one missing data vector, Reconst calls ReconstOne.
+// In that case, ensure the required vectors in vects are valid.
 //
 // Example:
 // in 3+2, the whole index: [0,1,2,3,4],
-// if vects[0,4] are lost, and they need to be reconstructed
-// (Maybe you only need vects[0], so the needReconst should be [0], but not [0,4]).
-// The "dpHas" will be [1,2,3], and you must be sure that vects[1] vects[2] vects[3] have correct data,
-// results will be written into vects[0]&vects[4] directly.
+// if vects[0,4] are lost and both need reconstruction,
+// dpHas should be [1,2,3], and vects[1], vects[2], vects[3] must be valid.
+// Reconstructed results are written back to vects[0] and vects[4] directly.
 func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
 
 	if len(needReconst) == 1 && needReconst[0] < x.RS.DataNum {
@@ -243,7 +244,7 @@ func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
 		return
 	}
 
-	// Step1: Reconstruct all a_vectors.
+	// Step 1: Reconstruct all a-vectors.
 	half := len(vects[0]) / 2
 	aVects := make([][]byte, len(vects))
 	for i := range vects {
@@ -260,13 +261,13 @@ func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
 		return
 	}
 
-	// Step2: Retrieve b_vectors to RS codes(if has).
+	// Step 2: Convert available b-vectors back to RS form when needed.
 	err = x.retrieveRS(vects, dpHas)
 	if err != nil {
 		return
 	}
 
-	// Step3: Reconstruct b_vectors using RS codes.
+	// Step 3: Reconstruct b-vectors using RS codes.
 	bVects := make([][]byte, len(vects))
 	for i := range vects {
 		bVects[i] = vects[i][half:]
@@ -276,7 +277,7 @@ func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
 		return
 	}
 
-	// Step4: XOR b_parity_vectors according to XORSet(if need).
+	// Step 4: Apply XOR to b-parity-vectors according to XORSet when needed.
 	d := x.RS.DataNum
 	_, pn := rs.SplitNeedReconst(d, needReconst)
 	if len(pn) != 0 {
@@ -299,8 +300,8 @@ func (x *XRS) Reconst(vects [][]byte, dpHas, needReconst []int) (err error) {
 	return nil
 }
 
-// retrieveRS retrieves b_parity_vects(if has) to RS codes
-// by XOR itself and a_vects in XORSet.
+// retrieveRS converts available b-parity-vectors back to RS form
+// by XOR-ing with the corresponding a-vectors defined in XORSet.
 func (x *XRS) retrieveRS(vects [][]byte, dpHas []int) (err error) {
 
 	half := len(vects[0]) / 2
@@ -318,8 +319,8 @@ func (x *XRS) retrieveRS(vects [][]byte, dpHas []int) (err error) {
 	return
 }
 
-// Update updates parity_data when one data_vect changes.
-// row: It's the new data's index in the whole vectors.
+// Update updates parity data when one data vector changes.
+// row is the index of the updated data vector in the full set.
 func (x *XRS) Update(oldData, newData []byte, row int, parity [][]byte) (err error) {
 
 	err = checkSize(oldData)
@@ -344,23 +345,21 @@ func (x *XRS) Update(oldData, newData []byte, row int, parity [][]byte) (err err
 	return
 }
 
-// Replace replaces oldData vectors with 0 or replaces 0 with newData vectors.
+// Replace replaces oldData vectors with zero vectors, or replaces zero vectors
+// with newData vectors.
 //
 // In practice,
-// If len(replaceRows) > dataNum-parityNum, it's better to use Encode,
-// because Replace needs to read len(replaceRows) + parityNum vectors,
-// if replaceRows are too many, the cost maybe larger than Encode
-// (Encode only needs to read dataNum).
-// Think about an EC compute node, and dataNum+parityNum data nodes model.
+// if len(replaceRows) > dataNum-parityNum, Encode is usually better.
+// Replace reads len(replaceRows)+parityNum vectors; with many replacements,
+// it may cost more than Encode (which only needs dataNum vectors).
 //
 // It's used in two situations:
-// 1. We didn't have enough data for filling in a stripe, but still did EC encode,
-// we need to replace several zero vectors with new vectors which have data after we get enough data finally.
-// 2. After compact, we may have several useless vectors in a stripe,
-// we need to replace these useless vectors with zero vectors for free space.
+//  1. The stripe was encoded before all data arrived; later, zero vectors are
+//     replaced by real data vectors.
+//  2. After compaction, obsolete vectors in a stripe are replaced by zero
+//     vectors to free space.
 //
-// Warn:
-// data's index & replaceRows must have the same sort.
+// data indexes and replaceRows must use the same order.
 func (x *XRS) Replace(data [][]byte, replaceRows []int, parity [][]byte) (err error) {
 
 	err = checkSize(data[0])
